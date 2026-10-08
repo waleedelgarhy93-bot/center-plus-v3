@@ -128,7 +128,9 @@ class LoginViewModel(application: Application) : AndroidViewModel(application) {
 
             if (user != null) {
                 sessionManager.saveCredentials(u, p)
-                if (user.role == "teacher" || user.role == User.ROLE_TEACHER) {
+                if (user.role == "teacher" || user.role == User.ROLE_TEACHER ||
+                    user.role == "student_online" || user.role == User.ROLE_STUDENT_ONLINE
+                ) {
                     sessionManager.saveSession(user)
                 }
                 Toast.makeText(getApplication(), "مرحبًا بك يا ${user.fullName}", Toast.LENGTH_SHORT).show()

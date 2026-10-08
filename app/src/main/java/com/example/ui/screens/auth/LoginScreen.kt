@@ -130,7 +130,10 @@ fun LoginScreen(
             val uId = viewModel.sessionManager.userId
             val user = viewModel.getUserForActiveSession(uId)
             if (user != null) {
-                if (role == "student" || role == User.ROLE_STUDENT || role == "student_online" || role == User.ROLE_STUDENT_ONLINE) {
+                if (role == "student_online" || role == User.ROLE_STUDENT_ONLINE) {
+                    // الطالب الأونلاين يدخل مباشرة دون مسح كارت
+                    onLoginSuccess(role, user)
+                } else if (role == "student" || role == User.ROLE_STUDENT) {
                     pendingStudentUser = user
                 } else if (role == "parent" || role == User.ROLE_PARENT) {
                     pendingParentUser = user
@@ -141,10 +144,20 @@ fun LoginScreen(
 
     val handleLoginSuccess: (String, User) -> Unit = { role, user ->
         when (role) {
-            "student", User.ROLE_STUDENT, "student_online", User.ROLE_STUDENT_ONLINE -> {
+            "teacher", User.ROLE_TEACHER -> {
+                // دخول مباشر لـ TeacherDashboard
+                onLoginSuccess(role, user)
+            }
+            "student_online", User.ROLE_STUDENT_ONLINE -> {
+                // دخول مباشر لـ StudentOnlineHome (مفيش عنده كارت)
+                onLoginSuccess(role, user)
+            }
+            "student", User.ROLE_STUDENT -> {
+                // طالب السنتر: مسح الكارت
                 pendingStudentUser = user
             }
             "parent", User.ROLE_PARENT -> {
+                // ولي الأمر: مسح كارت ابنه
                 pendingParentUser = user
             }
             else -> {
