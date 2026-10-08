@@ -1,0 +1,8 @@
+{
+  "name": "Remix سنتر لوبيتال",
+  "description": "تطبيق سنتر لوبيتال التعليمي - أ. وليد الجارحي",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

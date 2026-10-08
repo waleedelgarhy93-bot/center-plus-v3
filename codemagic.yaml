@@ -1,0 +1,35 @@
+workflows:
+  android-workflow:
+    name: Android APK Build
+    max_build_duration: 60
+    environment:
+      java: 17
+    scripts:
+      - name: Set up local properties
+        script: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
+      - name: Set up Gradle Wrapper
+        script: |
+          cd "$CM_BUILD_DIR"
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version 9.3.1
+            chmod +x gradlew
+          fi
+      - name: Create debug.keystore
+        script: |
+          cd "$CM_BUILD_DIR"
+          keytool -genkey -v -keystore debug.keystore \
+            -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+      - name: Build Android APK
+        script: |
+          cd "$CM_BUILD_DIR"
+          ./gradlew assembleDebug --no-daemon
+    artifacts:
+      - app/build/outputs/**/*.apk
+    publishing:
+      email:
+        recipients:
+          - waleedelgarhy93@gmail.com
