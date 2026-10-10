@@ -1,8 +1,12 @@
-﻿venv/
+﻿# Python
+venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Environment
 .env
-*.backup
+
+# Test files
 test_auth.py
 test_all.py
-.vscode/
