@@ -3,26 +3,23 @@ from flask import Blueprint, jsonify, request
 from datetime import datetime, timedelta
 
 from db import supabase
-from helpers import token_required
+from helpers import token_required, hash_password, verify_password
 
 admin_bp = Blueprint('admin', __name__)
 
 
 def _require_super_admin():
-    """يتحقق إن المستخدم الحالي super_admin"""
-    user_res = supabase.table('users')\
-        .select('role')\
-        .eq('id', request.user_id)\
-        .execute()
-
-    if not user_res.data or user_res.data[0]['role'] != 'super_admin':
-        return False, (jsonify({'success': False, 'error': 'غير مصرح'}), 403)
-
-    return True, None
+    """التحقق من أن المستخدم الحالي super_admin"""
+    try:
+        user_res = supabase.table('users').select('role').eq('id', request.user_id).execute()
+        if not user_res.data or user_res.data[0].get('role') not in ['super_admin', 'superadmin']:
+            return False, (jsonify({'success': False, 'error': 'غير مصرح'}), 403)
+        return True, None
+    except Exception as e:
+        return False, (jsonify({'success': False, 'error': f'خطأ صلاحيات: {str(e)}'}), 500)
 
 
 def _arabic_month(year, month):
-    """يرجّع اسم الشهر بالعربي"""
     months = [
         'يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو',
         'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
@@ -30,12 +27,13 @@ def _arabic_month(year, month):
     return f"{months[month - 1]} {year}"
 
 
-# ============ Stats ============
+# ============ إحصائيات لوحة الأدمن ============
 
-@admin_bp.route('/api/admin/stats', methods=['GET'])
+@admin_bp.route('/api/admin/stats', methods=['GET', 'OPTIONS'])
 @token_required
 def admin_stats():
-    """إحصائيات المنصة كلها"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
@@ -46,30 +44,19 @@ def admin_stats():
         total_tenants = len(tenants)
         active_tenants = len([t for t in tenants if t.get('status') == 'active'])
 
-        users_res = supabase.table('users')\
-            .select('id')\
-            .in_('role', ['teacher', 'assistant'])\
-            .execute()
+        users_res = supabase.table('users').select('id').in_('role', ['teacher', 'assistant']).execute()
         total_users = len(users_res.data or [])
 
         students_res = supabase.table('students').select('id').execute()
         total_students = len(students_res.data or [])
 
-        subs_res = supabase.table('subscriptions')\
-            .select('amount, status')\
-            .eq('status', 'active')\
-            .execute()
+        subs_res = supabase.table('subscriptions').select('amount, status').eq('status', 'active').execute()
         subs = subs_res.data or []
         total_revenue = sum(float(s.get('amount', 0)) for s in subs)
         active_subs = len(subs)
 
         soon = (datetime.now() + timedelta(days=7)).isoformat()
-        expiring_res = supabase.table('tenants')\
-            .select('id, name, subscription_end')\
-            .lt('subscription_end', soon)\
-            .gt('subscription_end', datetime.now().isoformat())\
-            .eq('status', 'active')\
-            .execute()
+        expiring_res = supabase.table('tenants').select('id, name, subscription_end').lt('subscription_end', soon).gt('subscription_end', datetime.now().isoformat()).eq('status', 'active').execute()
         expiring_soon = expiring_res.data or []
 
         return jsonify({
@@ -86,67 +73,84 @@ def admin_stats():
             },
             'expiring_soon': expiring_soon,
         })
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============ Tenants Management ============
+# ============ إدارة السناتر ============
 
-@admin_bp.route('/api/admin/tenants', methods=['GET'])
+@admin_bp.route('/api/admin/tenants', methods=['GET', 'OPTIONS'])
 @token_required
 def admin_get_tenants():
-    """جلب كل السناتر + إحصائيات كل واحد"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
             return err
 
-        response = supabase.table('tenants')\
-            .select('*')\
-            .order('created_at', desc=True)\
-            .execute()
+        response = supabase.table('tenants').select('*').order('created_at', desc=True).execute()
         tenants = response.data or []
 
         for t in tenants:
-            students_res = supabase.table('students')\
-                .select('id')\
-                .eq('tenant_id', t['id'])\
-                .execute()
-            users_res = supabase.table('users')\
-                .select('id')\
-                .eq('tenant_id', t['id'])\
-                .execute()
-            groups_res = supabase.table('groups')\
-                .select('id')\
-                .eq('tenant_id', t['id'])\
-                .execute()
+            t_id = t.get('id')
+            try:
+                students_res = supabase.table('students').select('id').eq('tenant_id', t_id).execute()
+                t['students_count'] = len(students_res.data or [])
+            except Exception:
+                t['students_count'] = 0
 
-            t['students_count'] = len(students_res.data or [])
-            t['users_count'] = len(users_res.data or [])
-            t['groups_count'] = len(groups_res.data or [])
+            try:
+                users_res = supabase.table('users').select('id').eq('tenant_id', t_id).execute()
+                t['users_count'] = len(users_res.data or [])
+            except Exception:
+                t['users_count'] = 0
+
+            try:
+                groups_res = supabase.table('groups').select('id').eq('tenant_id', t_id).execute()
+                t['groups_count'] = len(groups_res.data or [])
+            except Exception:
+                t['groups_count'] = 0
 
         return jsonify({
             'success': True,
             'count': len(tenants),
             'tenants': tenants
         })
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@admin_bp.route('/api/admin/tenants', methods=['POST'])
+@admin_bp.route('/api/admin/tenants/<tenant_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def admin_get_single_tenant(tenant_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        ok, err = _require_super_admin()
+        if not ok:
+            return err
+
+        tenant_res = supabase.table('tenants').select('*').eq('id', tenant_id).execute()
+        if not tenant_res.data:
+            return jsonify({'success': False, 'error': 'السنتر غير موجود'}), 404
+
+        return jsonify({'success': True, 'tenant': tenant_res.data[0]})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@admin_bp.route('/api/admin/tenants', methods=['POST', 'OPTIONS'])
 @token_required
 def admin_create_tenant():
-    """إنشاء سنتر جديد + حساب صاحبه + اشتراك"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
             return err
 
         data = request.get_json() or {}
-
         name = data.get('name')
         owner_name = data.get('owner_name')
         phone = data.get('phone')
@@ -157,33 +161,19 @@ def admin_create_tenant():
         owner_password = data.get('owner_password')
 
         if not name or not owner_name or not email:
-            return jsonify({
-                'success': False,
-                'error': 'name, owner_name, email مطلوبين'
-            }), 400
+            return jsonify({'success': False, 'error': 'name, owner_name, email مطلوبين'}), 400
 
         if not owner_username or not owner_password:
-            return jsonify({
-                'success': False,
-                'error': 'owner_username و owner_password مطلوبين'
-            }), 400
+            return jsonify({'success': False, 'error': 'owner_username و owner_password مطلوبين'}), 400
 
-        existing = supabase.table('users')\
-            .select('id')\
-            .eq('username', owner_username)\
-            .execute()
+        existing = supabase.table('users').select('id').eq('username', owner_username).execute()
         if existing.data:
-            return jsonify({
-                'success': False,
-                'error': 'username موجود بالفعل'
-            }), 409
-
-        from helpers import hash_password
+            return jsonify({'success': False, 'error': 'username موجود بالفعل'}), 409
 
         now = datetime.now()
-        sub_end = now + timedelta(days=30 * duration_months)
+        sub_end = now + timedelta(days=30 * int(duration_months))
 
-        tenant_res = supabase.table('tenants').insert({
+        tenant_payload = {
             'name': name,
             'owner_name': owner_name,
             'phone': phone,
@@ -192,10 +182,11 @@ def admin_create_tenant():
             'status': 'active',
             'subscription_start': now.isoformat(),
             'subscription_end': sub_end.isoformat(),
-            'max_students': 100,
-            'max_groups': 10,
-        }).execute()
+            'max_students': int(data.get('max_students', 100)),
+            'max_groups': int(data.get('max_groups', 10)),
+        }
 
+        tenant_res = supabase.table('tenants').insert(tenant_payload).execute()
         if not tenant_res.data:
             return jsonify({'success': False, 'error': 'فشل إنشاء السنتر'}), 500
 
@@ -232,35 +223,119 @@ def admin_create_tenant():
                 'tenant_id': tenant_id,
             }
         }), 201
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@admin_bp.route('/api/admin/tenants/<int:tenant_id>/toggle', methods=['PUT'])
+# ============ تعديل بيانات السنتر (يدعم POST و PUT) ============
+
+@admin_bp.route('/api/admin/tenants/<tenant_id>/update', methods=['POST', 'OPTIONS'])
+@admin_bp.route('/api/admin/tenants/<tenant_id>', methods=['PUT', 'POST', 'OPTIONS'])
 @token_required
-def admin_toggle_tenant(tenant_id):
-    """تفعيل/إيقاف سنتر"""
+def admin_update_tenant(tenant_id):
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
             return err
 
-        tenant_res = supabase.table('tenants')\
-            .select('status, name')\
-            .eq('id', tenant_id)\
-            .execute()
+        data = request.get_json() or {}
+        update_data = {}
+        fields = ['name', 'owner_name', 'phone', 'email', 'status', 'plan', 'max_students', 'max_groups', 'subscription_end']
+        
+        for field in fields:
+            if field in data and data[field] is not None:
+                if field in ['max_students', 'max_groups']:
+                    update_data[field] = int(data[field])
+                else:
+                    update_data[field] = data[field]
 
+        if not update_data:
+            return jsonify({'success': False, 'error': 'لا توجد بيانات للتعديل'}), 400
+
+        result = supabase.table('tenants').update(update_data).eq('id', tenant_id).execute()
+        if not result.data:
+            return jsonify({'success': False, 'error': 'السنتر غير موجود'}), 404
+
+        return jsonify({
+            'success': True,
+            'message': 'تم التعديل بنجاح',
+            'tenant': result.data[0]
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============ حذف السنتر (يدعم POST و DELETE لتجاوز حظر الشبكة) ============
+
+@admin_bp.route('/api/admin/tenants/<tenant_id>/delete', methods=['POST', 'OPTIONS'])
+@admin_bp.route('/api/admin/tenants/<tenant_id>', methods=['DELETE', 'POST', 'OPTIONS'])
+@token_required
+def admin_delete_tenant(tenant_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        ok, err = _require_super_admin()
+        if not ok:
+            return err
+
+        # التحقق من وجود السنتر أولاً
+        tenant_res = supabase.table('tenants').select('id, name').eq('id', tenant_id).execute()
+        if not tenant_res.data:
+            return jsonify({'success': False, 'error': 'السنتر غير موجود'}), 404
+
+        center_name = tenant_res.data[0].get('name', 'السنتر')
+
+        # استدعاء دالة الحذف المتسلسلة المعتمدة في Supabase
+        try:
+            supabase.rpc('delete_tenant_cascade', {'target_tenant_id': str(tenant_id)}).execute()
+        except Exception as rpc_err:
+            # مسار بديل للحذف البرمجي في حال تعذر تشغيل RPC
+            tables = [
+                'student_answers', 'student_exams', 'questions', 'exams',
+                'video_views', 'video_restrictions', 'videos', 'attendance',
+                'grades', 'cards', 'students', 'groups', 'subjects',
+                'device_settings', 'active_sessions', 'honor_points',
+                'honor_notifications', 'honor_settings', 'subscriptions', 'users'
+            ]
+            for table in tables:
+                try:
+                    supabase.table(table).delete().eq('tenant_id', tenant_id).execute()
+                except Exception:
+                    pass
+            supabase.table('tenants').delete().eq('id', tenant_id).execute()
+
+        return jsonify({
+            'success': True,
+            'message': f'تم حذف سنتر "{center_name}" وكافة بياناته نهائياً بنجاح'
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'فشل حذف السنتر: {str(e)}'}), 500
+
+
+# ============ تفعيل وإيقاف السنتر ============
+
+@admin_bp.route('/api/admin/tenants/<tenant_id>/toggle', methods=['POST', 'PUT', 'OPTIONS'])
+@token_required
+def admin_toggle_tenant(tenant_id):
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        ok, err = _require_super_admin()
+        if not ok:
+            return err
+
+        tenant_res = supabase.table('tenants').select('status, name').eq('id', tenant_id).execute()
         if not tenant_res.data:
             return jsonify({'success': False, 'error': 'السنتر غير موجود'}), 404
 
         current_status = tenant_res.data[0].get('status', 'active')
         new_status = 'suspended' if current_status == 'active' else 'active'
 
-        result = supabase.table('tenants')\
-            .update({'status': new_status})\
-            .eq('id', tenant_id)\
-            .execute()
+        result = supabase.table('tenants').update({'status': new_status}).eq('id', tenant_id).execute()
 
         return jsonify({
             'success': True,
@@ -268,35 +343,72 @@ def admin_toggle_tenant(tenant_id):
             'new_status': new_status,
             'tenant': result.data[0] if result.data else None
         })
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============ Subscriptions ============
+# ============ تغيير كلمة سر السوبر أدمن ============
 
-@admin_bp.route('/api/admin/subscriptions', methods=['GET'])
+@admin_bp.route('/api/admin/change-password', methods=['POST', 'OPTIONS'])
 @token_required
-def admin_get_subscriptions():
-    """جلب كل الاشتراكات"""
+def admin_change_password():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
             return err
 
-        response = supabase.table('subscriptions')\
-            .select('*')\
-            .order('created_at', desc=True)\
-            .execute()
+        data = request.get_json() or {}
+        current_password = data.get('current_password')
+        new_password = data.get('new_password')
+
+        if not current_password or not new_password:
+            return jsonify({'success': False, 'error': 'كلمة المرور الحالية والجديدة مطلوبتان'}), 400
+
+        # جلب بيانات السوبر أدمن الحالي
+        user_res = supabase.table('users').select('id, password').eq('id', request.user_id).execute()
+        if not user_res.data:
+            return jsonify({'success': False, 'error': 'المستخدم غير موجود'}), 404
+
+        user = user_res.data[0]
+
+        # التحقق من صحة كلمة المرور الحالية
+        if not verify_password(current_password, user['password']):
+            return jsonify({'success': False, 'error': 'كلمة المرور الحالية غير صحيحة'}), 400
+
+        # تشفير وحفظ كلمة المرور الجديدة
+        supabase.table('users').update({
+            'password': hash_password(new_password)
+        }).eq('id', user['id']).execute()
+
+        return jsonify({
+            'success': True,
+            'message': 'تم تغيير كلمة المرور بنجاح'
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============ الاشتراكات والتقارير ============
+
+@admin_bp.route('/api/admin/subscriptions', methods=['GET', 'OPTIONS'])
+@token_required
+def admin_get_subscriptions():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        ok, err = _require_super_admin()
+        if not ok:
+            return err
+
+        response = supabase.table('subscriptions').select('*').order('created_at', desc=True).execute()
         subs = response.data or []
 
         if subs:
             tenant_ids = list({s['tenant_id'] for s in subs if s.get('tenant_id')})
             if tenant_ids:
-                tenants_res = supabase.table('tenants')\
-                    .select('id, name, phone, owner_name, email')\
-                    .in_('id', tenant_ids)\
-                    .execute()
+                tenants_res = supabase.table('tenants').select('id, name, phone, owner_name, email').in_('id', tenant_ids).execute()
                 tenants_map = {t['id']: t for t in (tenants_res.data or [])}
                 for s in subs:
                     tenant = tenants_map.get(s.get('tenant_id'), {})
@@ -310,17 +422,15 @@ def admin_get_subscriptions():
             'count': len(subs),
             'subscriptions': subs
         })
-
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============ Reports ============
-
-@admin_bp.route('/api/admin/reports', methods=['GET'])
+@admin_bp.route('/api/admin/reports', methods=['GET', 'OPTIONS'])
 @token_required
 def admin_get_reports():
-    """تقارير شاملة للمنصة"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         ok, err = _require_super_admin()
         if not ok:
@@ -328,27 +438,21 @@ def admin_get_reports():
 
         now = datetime.now()
 
-        # 1) الإحصائيات العامة
-        tenants_res = supabase.table('tenants').select('id, status').execute()
+        tenants_res = supabase.table('tenants').select('id, status, name, owner_name, phone, subscription_end').execute()
         tenants = tenants_res.data or []
         total_tenants = len(tenants)
         active_tenants = len([t for t in tenants if t.get('status') == 'active'])
 
-        users_res = supabase.table('users').select('id')\
-            .in_('role', ['teacher', 'assistant']).execute()
+        users_res = supabase.table('users').select('id').in_('role', ['teacher', 'assistant']).execute()
         total_users = len(users_res.data or [])
 
         students_res = supabase.table('students').select('id').execute()
         total_students = len(students_res.data or [])
 
-        subs_res = supabase.table('subscriptions')\
-            .select('amount, status')\
-            .eq('status', 'active')\
-            .execute()
+        subs_res = supabase.table('subscriptions').select('amount').eq('status', 'active').execute()
         subs = subs_res.data or []
         total_revenue = sum(float(s.get('amount', 0)) for s in subs)
 
-        # 2) إيرادات آخر 6 شهور
         monthly_revenue = []
         for i in range(5, -1, -1):
             year = now.year
@@ -367,12 +471,7 @@ def admin_get_reports():
                 next_year += 1
             month_end = f'{next_year}-{str(next_month).zfill(2)}-01'
 
-            month_subs = supabase.table('subscriptions')\
-                .select('amount')\
-                .gte('created_at', month_start)\
-                .lt('created_at', month_end)\
-                .execute()
-
+            month_subs = supabase.table('subscriptions').select('amount').gte('created_at', month_start).lt('created_at', month_end).execute()
             month_total = sum(float(s.get('amount', 0)) for s in (month_subs.data or []))
 
             monthly_revenue.append({
@@ -381,85 +480,50 @@ def admin_get_reports():
                 'revenue': month_total,
             })
 
-        # 3) أعلى 5 سناتر بالطلاب
         top_by_students = []
         for t in tenants:
-            students_count = len(
-                (supabase.table('students').select('id')\
-                    .eq('tenant_id', t['id']).execute().data or [])
-            )
-            tenant_info = supabase.table('tenants')\
-                .select('name, owner_name')\
-                .eq('id', t['id'])\
-                .execute()
-            if tenant_info.data:
-                top_by_students.append({
-                    'tenant_id': t['id'],
-                    'tenant_name': tenant_info.data[0].get('name', '—'),
-                    'owner_name': tenant_info.data[0].get('owner_name', '—'),
-                    'students_count': students_count,
-                })
-
+            students_count = len(supabase.table('students').select('id').eq('tenant_id', t['id']).execute().data or [])
+            top_by_students.append({
+                'tenant_id': t['id'],
+                'tenant_name': t.get('name', '—'),
+                'owner_name': t.get('owner_name', '—'),
+                'students_count': students_count,
+            })
         top_by_students.sort(key=lambda x: x['students_count'], reverse=True)
         top_by_students = top_by_students[:5]
 
-        # 4) أعلى 5 سناتر بالإيرادات
         top_by_revenue = []
         for t in tenants:
-            tenant_subs = supabase.table('subscriptions')\
-                .select('amount')\
-                .eq('tenant_id', t['id'])\
-                .eq('status', 'active')\
-                .execute()
+            tenant_subs = supabase.table('subscriptions').select('amount').eq('tenant_id', t['id']).eq('status', 'active').execute()
             revenue = sum(float(s.get('amount', 0)) for s in (tenant_subs.data or []))
-
-            tenant_info = supabase.table('tenants')\
-                .select('name, owner_name')\
-                .eq('id', t['id'])\
-                .execute()
-            if tenant_info.data:
-                top_by_revenue.append({
-                    'tenant_id': t['id'],
-                    'tenant_name': tenant_info.data[0].get('name', '—'),
-                    'owner_name': tenant_info.data[0].get('owner_name', '—'),
-                    'revenue': revenue,
-                })
-
+            top_by_revenue.append({
+                'tenant_id': t['id'],
+                'tenant_name': t.get('name', '—'),
+                'owner_name': t.get('owner_name', '—'),
+                'revenue': revenue,
+            })
         top_by_revenue.sort(key=lambda x: x['revenue'], reverse=True)
         top_by_revenue = top_by_revenue[:5]
 
-        # 5) اشتراكات قريبة الانتهاء
         soon = (now + timedelta(days=7)).isoformat()
-        expiring_res = supabase.table('tenants')\
-            .select('id, name, owner_name, subscription_end, phone')\
-            .lt('subscription_end', soon)\
-            .gt('subscription_end', now.isoformat())\
-            .eq('status', 'active')\
-            .order('subscription_end')\
-            .execute()
-        expiring_soon = expiring_res.data or []
+        expiring_soon = [
+            t for t in tenants
+            if t.get('status') == 'active'
+            and t.get('subscription_end')
+            and now.isoformat() < t['subscription_end'] < soon
+        ]
 
-        # 6) سناتر بلا نشاط
         inactive_tenants = []
         for t in tenants:
             if t.get('status') != 'active':
                 continue
-            students_count = len(
-                (supabase.table('students').select('id')\
-                    .eq('tenant_id', t['id']).execute().data or [])
-            )
+            students_count = len(supabase.table('students').select('id').eq('tenant_id', t['id']).execute().data or [])
             if students_count == 0:
-                tenant_info = supabase.table('tenants')\
-                    .select('name, owner_name, created_at')\
-                    .eq('id', t['id'])\
-                    .execute()
-                if tenant_info.data:
-                    inactive_tenants.append({
-                        'tenant_id': t['id'],
-                        'tenant_name': tenant_info.data[0].get('name', '—'),
-                        'owner_name': tenant_info.data[0].get('owner_name', '—'),
-                        'created_at': tenant_info.data[0].get('created_at'),
-                    })
+                inactive_tenants.append({
+                    'tenant_id': t['id'],
+                    'tenant_name': t.get('name', '—'),
+                    'owner_name': t.get('owner_name', '—'),
+                })
 
         return jsonify({
             'success': True,
@@ -478,7 +542,6 @@ def admin_get_reports():
             'expiring_soon': expiring_soon,
             'inactive_tenants': inactive_tenants,
         })
-
     except Exception as e:
         import traceback
         traceback.print_exc()

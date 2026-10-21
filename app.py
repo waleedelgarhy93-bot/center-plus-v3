@@ -1,23 +1,42 @@
 ﻿# app.py - Center Plus SaaS (Main Entry Point)
 import os
-from flask import Flask, jsonify
+import warnings
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# تجاهل WinError 10035
-import warnings
 warnings.filterwarnings('ignore')
-
 load_dotenv()
-
-# ============ Flask App ============
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY')
 
-CORS(app)
+# إعداد CORS الشامل لـ Vercel والمحلي
+CORS(
+    app,
+    resources={r"/*": {
+        "origins": [
+            "https://lopital-center.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000"
+        ]
+    }},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    supports_credentials=True,
+)
 
+# دعم الرد على OPTIONS عالمياً
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        response.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response, 200
 
 # ============ Register Blueprints ============
 
@@ -53,7 +72,6 @@ app.register_blueprint(admin_bp)
 app.register_blueprint(honor_bp)
 app.register_blueprint(devices_bp)
 
-
 # ============ Basic Routes ============
 
 @app.route('/')
@@ -65,7 +83,6 @@ def home():
         'architecture': 'modular (blueprints)'
     })
 
-
 @app.route('/api/health')
 def health():
     return jsonify({
@@ -73,19 +90,10 @@ def health():
         'supabase_url': os.getenv('SUPABASE_URL')
     })
 
-
 @app.route('/api/test')
 def test():
     return jsonify({'message': 'API is working!'})
 
-
-# ============ Run ============
-
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    print("=" * 50)
-    print("Center Plus API v2.0")
-    print("Server: http://localhost:" + str(port))
-    print("Architecture: Modular Blueprints")
-    print("=" * 50)
     app.run(host='0.0.0.0', port=port, debug=False)

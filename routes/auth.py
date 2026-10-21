@@ -20,32 +20,56 @@ auth_bp = Blueprint('auth', __name__)
 
 def _get_device_limit(tenant_id, role):
     """يرجّع الحد الأقصى لعدد الأجهزة حسب دور المستخدم"""
+    # المعلم والسوبر أدمن بدون حد أقصى نهائياً
+    if role in ('teacher', 'super_admin', 'superadmin'):
+        return 999999
+
     default_limits = {
         'student': 1,
         'parent': 2,
-        'teacher': 3,
-        'assistant': 1,
+        'assistant': 2,
     }
 
     if not tenant_id:
         return default_limits.get(role, 1)
 
-    settings_res = supabase.table('device_settings')\
-        .select('*')\
-        .eq('tenant_id', tenant_id)\
-        .execute()
+    try:
+        settings_res = supabase.table('device_settings')\
+            .select('*')\
+            .eq('tenant_id', tenant_id)\
+            .execute()
 
-    if not settings_res.data:
+        if not settings_res.data:
+            return default_limits.get(role, 1)
+
+        settings = settings_res.data[0]
+        role_key = f"{role}_limit"
+
+        return settings.get(role_key, default_limits.get(role, 1))
+    except Exception:
         return default_limits.get(role, 1)
-
-    settings = settings_res.data[0]
-    role_key = f"{role}_limit"
-
-    return settings.get(role_key, default_limits.get(role, 1))
 
 
 def _check_and_save_session(user_id, user_type, user_role, tenant_id, device_id):
     """يتحقق من عدد الأجهزة المسموح"""
+    # استثناء المعلم والإدارة من الحظر نهائياً
+    if user_role in ('teacher', 'super_admin', 'superadmin'):
+        try:
+            supabase.table('active_sessions').insert({
+                'user_id': user_id,
+                'user_type': user_type,
+                'user_role': user_role,
+                'tenant_id': tenant_id,
+                'device_id': device_id,
+                'ip_address': request.remote_addr or 'unknown',
+                'user_agent': request.headers.get('User-Agent', 'unknown')[:500],
+                'is_active': True,
+                'last_active': datetime.utcnow().isoformat(),
+            }).execute()
+        except Exception:
+            pass
+        return True, None
+
     limit = _get_device_limit(tenant_id, user_role)
 
     existing = supabase.table('active_sessions')\
@@ -58,7 +82,7 @@ def _check_and_save_session(user_id, user_type, user_role, tenant_id, device_id)
     sessions = existing.data or []
 
     # لو نفس الجهاز موجود بالفعل → تحديث last_active
-    same_device = next((s for s in sessions if s['device_id'] == device_id), None)
+    same_device = next((s for s in sessions if s.get('device_id') == device_id), None)
     if same_device:
         supabase.table('active_sessions').update({
             'last_active': datetime.utcnow().isoformat(),
@@ -69,7 +93,7 @@ def _check_and_save_session(user_id, user_type, user_role, tenant_id, device_id)
 
     if current_count >= limit:
         if limit == 1:
-            # حالة جهاز واحد: نطرد القديم
+            # حالة جهاز واحد (مثل الطالب): نطرد الجلسة القديمة تلقائياً وندخله بالجهاز الجديد
             for s in sessions:
                 supabase.table('active_sessions').update({
                     'is_active': False,
@@ -98,8 +122,10 @@ def _check_and_save_session(user_id, user_type, user_role, tenant_id, device_id)
 
 # ============ Login / Register ============
 
-@auth_bp.route('/api/auth/register', methods=['POST'])
+@auth_bp.route('/api/auth/register', methods=['POST', 'OPTIONS'])
 def register():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         username = data.get('username')
@@ -134,8 +160,10 @@ def register():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@auth_bp.route('/api/auth/login', methods=['POST'])
+@auth_bp.route('/api/auth/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         username = data.get('username')
@@ -155,7 +183,7 @@ def login():
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
         # التحقق من حالة السنتر
-        if user.get('tenant_id') and user.get('role') != 'super_admin':
+        if user.get('tenant_id') and user.get('role') not in ('super_admin', 'superadmin'):
             tenant_res = supabase.table('tenants')\
                 .select('status')\
                 .eq('id', user['tenant_id'])\
@@ -167,7 +195,7 @@ def login():
                     'error': 'السنتر موقوف. تواصل مع الإدارة'
                 }), 403
 
-        # Single Device
+        # التحقق من الجلسات والأجهزة
         ok, err = _check_and_save_session(
             user_id=user['id'],
             user_type='user',
@@ -198,9 +226,11 @@ def login():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@auth_bp.route('/api/auth/logout', methods=['POST'])
+@auth_bp.route('/api/auth/logout', methods=['POST', 'OPTIONS'])
 @token_required
 def logout():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         device_id = data.get('device_id', 'unknown')
@@ -217,9 +247,11 @@ def logout():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@auth_bp.route('/api/auth/me', methods=['GET'])
+@auth_bp.route('/api/auth/me', methods=['GET', 'OPTIONS'])
 @token_required
 def me():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
         if not user_res.data:
@@ -244,8 +276,10 @@ def me():
 
 # ============ Student Login ============
 
-@auth_bp.route('/api/auth/login-student', methods=['POST'])
+@auth_bp.route('/api/auth/login-student', methods=['POST', 'OPTIONS'])
 def login_student():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         barcode = data.get('barcode')
@@ -277,7 +311,7 @@ def login_student():
 
         student = student_res.data[0]
 
-        # Single Device
+        # فحص جلسة الطالب (الحد جهاز واحد: يطرد القديم ويدخل بالجديد)
         ok, err = _check_and_save_session(
             user_id=student['id'],
             user_type='student',
@@ -310,9 +344,11 @@ def login_student():
 
 # ============ Parent ============
 
-@auth_bp.route('/api/auth/register-parent', methods=['POST'])
+@auth_bp.route('/api/auth/register-parent', methods=['POST', 'OPTIONS'])
 @token_required
 def register_parent():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         student_id = data.get('student_id')
@@ -389,9 +425,11 @@ def register_parent():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@auth_bp.route('/api/auth/parent/child', methods=['GET'])
+@auth_bp.route('/api/auth/parent/child', methods=['GET', 'OPTIONS'])
 @token_required
 def get_parent_child():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
         if not user_res.data:
@@ -435,9 +473,11 @@ def get_parent_child():
 
 # ============ Assistant ============
 
-@auth_bp.route('/api/auth/register-assistant', methods=['POST'])
+@auth_bp.route('/api/auth/register-assistant', methods=['POST', 'OPTIONS'])
 @token_required
 def register_assistant():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         username = data.get('username')
@@ -477,11 +517,12 @@ def register_assistant():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============ TEMPORARY: Reset Password (للتطوير فقط) ============
+# ============ DEV ONLY: Reset Password ============
 
-@auth_bp.route('/api/auth/dev-reset-password', methods=['POST'])
+@auth_bp.route('/api/auth/dev-reset-password', methods=['POST', 'OPTIONS'])
 def dev_reset_password():
-    """⚠️ للتطوير فقط — نصفر الباسورد لأي مستخدم"""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         data = request.get_json() or {}
         username = data.get('username')

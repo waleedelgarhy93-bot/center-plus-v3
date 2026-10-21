@@ -41,9 +41,13 @@ def create_token(user_id: int, role: str) -> str:
 
 
 def token_required(f):
-    """Decorator للتحقق من الـ JWT Token"""
+    """Decorator للتحقق من الـ JWT Token مع استثناء طلبات OPTIONS"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # ⚠️ الحل السحري: السماح لطلبات Preflight بالمرور فوراً بحالة 200 OK
+        if request.method == 'OPTIONS':
+            return '', 200
+
         token = None
         auth_header = request.headers.get('Authorization')
 
@@ -69,11 +73,6 @@ def token_required(f):
 # ============ Multi-tenancy Helpers ============
 
 def get_current_tenant_id():
-    """
-    يرجّع tenant_id بتاع المستخدم الحالي + دوره
-    - super_admin → (None, 'super_admin')
-    - باقي الأدوار → (tenant_id, role)
-    """
     try:
         user_res = supabase.table('users')\
             .select('tenant_id, role')\
@@ -91,45 +90,28 @@ def get_current_tenant_id():
 
 
 def apply_tenant_filter(query):
-    """
-    يضيف فلتر tenant_id على query
-    - super_admin: يشوف كل حاجة (بدون فلتر)
-    - باقي الأدوار: مفلتر على tenant_id بتاعه
-    """
     tenant_id, role = get_current_tenant_id()
 
-    # super_admin يشوف كل حاجة
     if role == 'super_admin':
         return query
 
-    # باقي الأدوار: فلتر على سنتره
     if tenant_id:
         return query.eq('tenant_id', tenant_id)
 
-    # لو مفيش tenant_id → نرجّع query فاضي
     return query.eq('tenant_id', -1)
 
 
 def get_tenant_for_insert():
-    """
-    يرجّع tenant_id اللي المفروض يتحفظ مع البيانات الجديدة
-    """
     tenant_id, role = get_current_tenant_id()
     return tenant_id
 
 
 def is_super_admin():
-    """هل المستخدم الحالي super_admin؟"""
     _, role = get_current_tenant_id()
     return role == 'super_admin'
 
 
 def check_tenant_ownership(record: dict) -> bool:
-    """
-    يتحقق إن السجل بتاع نفس سنتر المستخدم
-    - super_admin → True دايماً
-    - باقي الأدوار → يقارن tenant_id
-    """
     if is_super_admin():
         return True
 
