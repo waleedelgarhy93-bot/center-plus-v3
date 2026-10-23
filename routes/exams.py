@@ -1,4 +1,4 @@
-# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
+﻿# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
 from flask import Blueprint, jsonify, request
 import json
 import re
@@ -14,6 +14,47 @@ from helpers import (
 )
 
 exams_bp = Blueprint('exams', __name__)
+
+# ============ Helper: حفظ/تحديث مجموعات الاختبار ============
+
+def _save_exam_groups(exam_id, group_ids, tenant_id):
+    supabase.table('exam_groups').delete().eq('exam_id', exam_id).execute()
+    if group_ids:
+        rows = [{'exam_id': exam_id, 'group_id': gid, 'tenant_id': tenant_id} for gid in group_ids]
+        supabase.table('exam_groups').insert(rows).execute()
+
+
+def _get_exam_group_ids(exam_id):
+    res = supabase.table('exam_groups').select('group_id').eq('exam_id', exam_id).execute()
+    return [r['group_id'] for r in (res.data or [])]
+
+
+def _enrich_exams_with_groups(exams):
+    if not exams:
+        return exams
+    exam_ids = [e['id'] for e in exams]
+    eg_res = supabase.table('exam_groups').select('exam_id, group_id').in_('exam_id', exam_ids).execute()
+    eg_data = eg_res.data or []
+    all_group_ids = list({r['group_id'] for r in eg_data})
+    groups_map = {}
+    if all_group_ids:
+        grps = supabase.table('groups').select('id, grade, center').in_('id', all_group_ids).execute()
+        groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps.data or [])}
+    exam_groups_map = {}
+    for r in eg_data:
+        eid = r['exam_id']
+        gid = r['group_id']
+        if eid not in exam_groups_map:
+            exam_groups_map[eid] = []
+        exam_groups_map[eid].append(gid)
+    for e in exams:
+        gids = exam_groups_map.get(e['id'], [])
+        e['group_ids'] = gids
+        e['group_names'] = [groups_map.get(gid, '') for gid in gids]
+        e['group_id'] = gids[0] if gids else e.get('group_id')
+        e['group_name'] = groups_map.get(e['group_id']) if e.get('group_id') else None
+    return exams
+
 
 
 # ============ Exams CRUD (Teacher) ============
@@ -61,10 +102,14 @@ def create_exam():
 
         tenant_id = get_tenant_for_insert()
 
+        group_ids = data.get('group_ids', [])
+        if not group_ids and data.get('group_id'):
+            group_ids = [data['group_id']]
+
         new_exam = supabase.table('exams').insert({
             'title': title,
             'description': data.get('description'),
-            'group_id': data.get('group_id'),
+            'group_id': group_ids[0] if group_ids else None,
             'subject_id': data.get('subject_id'),
             'teacher_id': request.user_id,
             'max_grade': data.get('max_grade', 100),
@@ -79,11 +124,12 @@ def create_exam():
             'tenant_id': tenant_id,
         }).execute()
 
-        return jsonify({
-            'success': True,
-            'message': 'تم إنشاء الاختبار',
-            'exam': new_exam.data[0] if new_exam.data else None
-        }), 201
+        exam = new_exam.data[0] if new_exam.data else None
+        if exam and group_ids:
+            _save_exam_groups(exam['id'], group_ids, tenant_id)
+            exam['group_ids'] = group_ids
+
+        return jsonify({'success': True, 'message': 'تم إنشاء الاختبار', 'exam': exam}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -125,13 +171,22 @@ def update_exam(exam_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'group_id', 'subject_id', 'max_grade',
+        for field in ['title', 'description', 'subject_id', 'max_grade',
                       'duration_minutes', 'show_result', 'has_essay', 'essay_prompt',
                       'essay_max_grade', 'is_published', 'exam_type', 'external_link']:
             if field in data:
                 update_data[field] = data[field]
 
-        if not update_data:
+        group_ids = data.get('group_ids')
+        if group_ids is None and 'group_id' in data:
+            group_ids = [data['group_id']] if data['group_id'] else []
+
+        if group_ids is not None:
+            update_data['group_id'] = group_ids[0] if group_ids else None
+            tenant_id = existing.data[0].get('tenant_id')
+            _save_exam_groups(exam_id, group_ids, tenant_id)
+
+        if not update_data and group_ids is None:
             return jsonify({'success': False, 'error': 'مفيش بيانات للتعديل'}), 400
 
         result = supabase.table('exams').update(update_data).eq('id', exam_id).execute()
@@ -265,8 +320,20 @@ def get_student_exams():
         elif subject_id:
             query = query.eq('subject_id', subject_id)
 
+        # جلب الاختبارات عبر exam_groups
+        eg_exam_ids = []
+        if group_id:
+            eg_res = supabase.table('exam_groups').select('exam_id').eq('group_id', group_id).execute()
+            eg_exam_ids = [r['exam_id'] for r in (eg_res.data or [])]
+
         exams_res = query.order('created_at', desc=True).execute()
         exams = exams_res.data or []
+
+        existing_ids = {e['id'] for e in exams}
+        remaining_ids = [eid for eid in eg_exam_ids if eid not in existing_ids]
+        if remaining_ids:
+            extra_res = supabase.table('exams').select('*').in_('id', remaining_ids).eq('is_published', True).execute()
+            exams += (extra_res.data or [])
 
         submissions_res = supabase.table('student_exams')\
             .select('*')\
@@ -864,3 +931,4 @@ def _recalculate_submission_grade(submission_id):
     except Exception as e:
         print(f"⚠️ فشل حساب الدرجة: {e}")
         return 0
+

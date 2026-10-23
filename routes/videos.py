@@ -1,4 +1,4 @@
-# routes/videos.py - الفيديوهات + المشاهدات + القيود
+# routes/videos.py - الفيديوهات + المشاهدات + القيود + دعم أكثر من مجموعة
 from flask import Blueprint, jsonify, request
 from datetime import datetime
 
@@ -11,6 +11,57 @@ from helpers import (
 )
 
 videos_bp = Blueprint('videos', __name__)
+
+
+# ============ Helper: حفظ/تحديث مجموعات الفيديو ============
+
+def _save_video_groups(video_id, group_ids, tenant_id):
+    """احذف القديم وأضف الجديد في video_groups"""
+    supabase.table('video_groups').delete().eq('video_id', video_id).execute()
+    if group_ids:
+        rows = [{'video_id': video_id, 'group_id': gid, 'tenant_id': tenant_id} for gid in group_ids]
+        supabase.table('video_groups').insert(rows).execute()
+
+
+def _get_video_group_ids(video_id):
+    """جلب قائمة group_id لفيديو معين"""
+    res = supabase.table('video_groups').select('group_id').eq('video_id', video_id).execute()
+    return [r['group_id'] for r in (res.data or [])]
+
+
+def _enrich_videos_with_groups(videos):
+    """إضافة group_ids وgroup_names لكل فيديو في القائمة"""
+    if not videos:
+        return videos
+
+    video_ids = [v['id'] for v in videos]
+    vg_res = supabase.table('video_groups').select('video_id, group_id').in_('video_id', video_ids).execute()
+    vg_data = vg_res.data or []
+
+    all_group_ids = list({r['group_id'] for r in vg_data})
+    groups_map = {}
+    if all_group_ids:
+        grps = supabase.table('groups').select('id, grade, center').in_('id', all_group_ids).execute()
+        groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps.data or [])}
+
+    # تجميع المجموعات لكل فيديو
+    video_groups_map = {}
+    for r in vg_data:
+        vid = r['video_id']
+        gid = r['group_id']
+        if vid not in video_groups_map:
+            video_groups_map[vid] = []
+        video_groups_map[vid].append(gid)
+
+    for v in videos:
+        gids = video_groups_map.get(v['id'], [])
+        v['group_ids'] = gids
+        v['group_names'] = [groups_map.get(gid, '') for gid in gids]
+        # للتوافق مع القديم
+        v['group_id'] = gids[0] if gids else v.get('group_id')
+        v['group_name'] = groups_map.get(v['group_id']) if v['group_id'] else None
+
+    return videos
 
 
 # ============ Videos CRUD (Teacher) ============
@@ -26,27 +77,16 @@ def get_videos():
 
         if videos:
             subject_ids = list({v['subject_id'] for v in videos if v.get('subject_id')})
-            group_ids = list({v['group_id'] for v in videos if v.get('group_id')})
-
             subjects_map = {}
             if subject_ids:
                 subs = supabase.table('subjects').select('id, name').in_('id', subject_ids).execute()
                 subjects_map = {s['id']: s['name'] for s in (subs.data or [])}
-
-            groups_map = {}
-            if group_ids:
-                grps = supabase.table('groups').select('id, grade, center').in_('id', group_ids).execute()
-                groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps.data or [])}
-
             for v in videos:
                 v['subject_name'] = subjects_map.get(v.get('subject_id'))
-                v['group_name'] = groups_map.get(v.get('group_id'))
 
-        return jsonify({
-            'success': True,
-            'count': len(videos),
-            'videos': videos
-        })
+            videos = _enrich_videos_with_groups(videos)
+
+        return jsonify({'success': True, 'count': len(videos), 'videos': videos})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -63,23 +103,30 @@ def create_video():
             return jsonify({'success': False, 'error': 'title و video_url مطلوبين'}), 400
 
         tenant_id = get_tenant_for_insert()
+        group_ids = data.get('group_ids', [])
+
+        # للتوافق مع القديم: لو بعت group_id واحد بس
+        if not group_ids and data.get('group_id'):
+            group_ids = [data['group_id']]
 
         new_video = supabase.table('videos').insert({
             'title': title,
             'description': data.get('description'),
             'video_url': video_url,
             'subject_id': data.get('subject_id'),
-            'group_id': data.get('group_id'),
+            'group_id': group_ids[0] if group_ids else None,  # الأول للتوافق
             'teacher_id': request.user_id,
             'max_views': data.get('max_views', 0),
             'tenant_id': tenant_id,
         }).execute()
 
-        return jsonify({
-            'success': True,
-            'message': 'تم إضافة الفيديو',
-            'video': new_video.data[0] if new_video.data else None
-        }), 201
+        video = new_video.data[0] if new_video.data else None
+
+        if video and group_ids:
+            _save_video_groups(video['id'], group_ids, tenant_id)
+            video['group_ids'] = group_ids
+
+        return jsonify({'success': True, 'message': 'تم إضافة الفيديو', 'video': video}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -96,20 +143,26 @@ def update_video(video_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'video_url', 'subject_id', 'group_id', 'max_views']:
+        for field in ['title', 'description', 'video_url', 'subject_id', 'max_views']:
             if field in data:
                 update_data[field] = data[field]
 
-        if not update_data:
-            return jsonify({'success': False, 'error': 'مفيش بيانات للتعديل'}), 400
+        group_ids = data.get('group_ids')
+        if group_ids is None and 'group_id' in data:
+            group_ids = [data['group_id']] if data['group_id'] else []
 
-        result = supabase.table('videos').update(update_data).eq('id', video_id).execute()
+        if group_ids is not None:
+            update_data['group_id'] = group_ids[0] if group_ids else None
+            tenant_id = existing.data[0].get('tenant_id')
+            _save_video_groups(video_id, group_ids, tenant_id)
 
-        return jsonify({
-            'success': True,
-            'message': 'تم التعديل',
-            'video': result.data[0] if result.data else None
-        })
+        if update_data:
+            result = supabase.table('videos').update(update_data).eq('id', video_id).execute()
+            video = result.data[0] if result.data else None
+        else:
+            video = None
+
+        return jsonify({'success': True, 'message': 'تم التعديل', 'video': video})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -124,8 +177,8 @@ def delete_video(video_id):
         if not check_tenant_ownership(existing.data[0]):
             return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
+        # video_groups يتحذف تلقائياً بسبب ON DELETE CASCADE
         supabase.table('videos').delete().eq('id', video_id).execute()
-
         return jsonify({'success': True, 'message': 'تم الحذف'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -151,11 +204,18 @@ def get_student_videos():
             if group_res.data:
                 subject_id = group_res.data[0].get('subject_id')
 
+        # جلب IDs الفيديوهات المخصصة لمجموعة الطالب عبر video_groups
+        vg_video_ids = []
+        if group_id:
+            vg_res = supabase.table('video_groups').select('video_id').eq('group_id', group_id).execute()
+            vg_video_ids = [r['video_id'] for r in (vg_res.data or [])]
+
         # الفيديوهات حسب سنتر الطالب
         query = supabase.table('videos').select('*').eq('tenant_id', student_tenant)
 
         if group_id and subject_id:
-            query = query.or_(f'group_id.eq.{group_id},subject_id.eq.{subject_id},group_id.is.null')
+            filter_parts = f'group_id.eq.{group_id},subject_id.eq.{subject_id},group_id.is.null'
+            query = query.or_(filter_parts)
         elif group_id:
             query = query.or_(f'group_id.eq.{group_id},group_id.is.null')
         elif subject_id:
@@ -163,6 +223,13 @@ def get_student_videos():
 
         videos_res = query.order('created_at', desc=True).execute()
         videos = videos_res.data or []
+
+        # إضافة الفيديوهات من video_groups التي لم تُجلب بعد
+        existing_ids = {v['id'] for v in videos}
+        remaining_ids = [vid for vid in vg_video_ids if vid not in existing_ids]
+        if remaining_ids:
+            extra_res = supabase.table('videos').select('*').in_('id', remaining_ids).execute()
+            videos += (extra_res.data or [])
 
         views_res = supabase.table('video_views').select('*').eq('student_id', request.user_id).execute()
         views_map = {v['video_id']: v for v in (views_res.data or [])}
@@ -178,14 +245,11 @@ def get_student_videos():
         for v in videos:
             if v['id'] in blocked_ids:
                 continue
-
             view_data = views_map.get(v['id'], {'views_count': 0})
             views_count = view_data.get('views_count', 0)
             max_views = v.get('max_views', 0)
-
             if max_views > 0 and views_count >= max_views:
                 continue
-
             result.append({
                 **v,
                 'views_count': views_count,
@@ -199,15 +263,10 @@ def get_student_videos():
             if subject_ids:
                 subs = supabase.table('subjects').select('id, name').in_('id', subject_ids).execute()
                 subjects_map = {s['id']: s['name'] for s in (subs.data or [])}
-
             for v in result:
                 v['subject_name'] = subjects_map.get(v.get('subject_id'))
 
-        return jsonify({
-            'success': True,
-            'count': len(result),
-            'videos': result
-        })
+        return jsonify({'success': True, 'count': len(result), 'videos': result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -217,7 +276,6 @@ def get_student_videos():
 def record_video_view(video_id):
     try:
         student_id = request.user_id
-
         video_res = supabase.table('videos').select('*').eq('id', video_id).execute()
         if not video_res.data:
             return jsonify({'success': False, 'error': 'الفيديو غير موجود'}), 404
@@ -226,59 +284,32 @@ def record_video_view(video_id):
         max_views = video.get('max_views', 0)
 
         block_res = supabase.table('video_restrictions')\
-            .select('*')\
-            .eq('video_id', video_id)\
-            .eq('student_id', student_id)\
-            .eq('is_blocked', True)\
-            .execute()
-
+            .select('*').eq('video_id', video_id).eq('student_id', student_id).eq('is_blocked', True).execute()
         if block_res.data:
             return jsonify({'success': False, 'error': 'الفيديو مقفول لك'}), 403
 
         view_res = supabase.table('video_views')\
-            .select('*')\
-            .eq('video_id', video_id)\
-            .eq('student_id', student_id)\
-            .execute()
+            .select('*').eq('video_id', video_id).eq('student_id', student_id).execute()
 
         now = datetime.utcnow().isoformat()
-
         if view_res.data:
             view = view_res.data[0]
             views_count = view.get('views_count', 0)
-
             if max_views > 0 and views_count >= max_views:
-                return jsonify({
-                    'success': False,
-                    'error': 'انتهت عدد المشاهدات',
-                    'views_count': views_count,
-                    'max_views': max_views
-                }), 403
-
-            supabase.table('video_views').update({
-                'views_count': views_count + 1,
-                'last_viewed_at': now
-            }).eq('id', view['id']).execute()
-
+                return jsonify({'success': False, 'error': 'انتهت عدد المشاهدات',
+                                'views_count': views_count, 'max_views': max_views}), 403
+            supabase.table('video_views').update({'views_count': views_count + 1, 'last_viewed_at': now})\
+                .eq('id', view['id']).execute()
             new_count = views_count + 1
         else:
             supabase.table('video_views').insert({
-                'video_id': video_id,
-                'student_id': student_id,
-                'views_count': 1,
-                'last_viewed_at': now,
-                'tenant_id': video.get('tenant_id'),
+                'video_id': video_id, 'student_id': student_id,
+                'views_count': 1, 'last_viewed_at': now, 'tenant_id': video.get('tenant_id'),
             }).execute()
-
             new_count = 1
 
-        return jsonify({
-            'success': True,
-            'message': 'تم تسجيل المشاهدة',
-            'views_count': new_count,
-            'max_views': max_views,
-            'views_remaining': (max_views - new_count) if max_views > 0 else -1
-        })
+        return jsonify({'success': True, 'message': 'تم تسجيل المشاهدة', 'views_count': new_count,
+                        'max_views': max_views, 'views_remaining': (max_views - new_count) if max_views > 0 else -1})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -290,11 +321,9 @@ def block_video_for_student(video_id):
         data = request.get_json() or {}
         student_id = data.get('student_id')
         is_blocked = data.get('is_blocked', True)
-
         if not student_id:
             return jsonify({'success': False, 'error': 'student_id مطلوب'}), 400
 
-        # التحقق من الفيديو
         video_res = supabase.table('videos').select('tenant_id').eq('id', video_id).execute()
         if not video_res.data:
             return jsonify({'success': False, 'error': 'الفيديو غير موجود'}), 404
@@ -302,28 +331,17 @@ def block_video_for_student(video_id):
             return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
         existing = supabase.table('video_restrictions')\
-            .select('*')\
-            .eq('video_id', video_id)\
-            .eq('student_id', student_id)\
-            .execute()
-
+            .select('*').eq('video_id', video_id).eq('student_id', student_id).execute()
         if existing.data:
-            result = supabase.table('video_restrictions')\
-                .update({'is_blocked': is_blocked})\
-                .eq('id', existing.data[0]['id'])\
-                .execute()
+            supabase.table('video_restrictions').update({'is_blocked': is_blocked})\
+                .eq('id', existing.data[0]['id']).execute()
         else:
-            result = supabase.table('video_restrictions').insert({
-                'video_id': video_id,
-                'student_id': student_id,
-                'is_blocked': is_blocked,
-                'tenant_id': video_res.data[0].get('tenant_id'),
+            supabase.table('video_restrictions').insert({
+                'video_id': video_id, 'student_id': student_id,
+                'is_blocked': is_blocked, 'tenant_id': video_res.data[0].get('tenant_id'),
             }).execute()
 
-        return jsonify({
-            'success': True,
-            'message': 'مقفول' if is_blocked else 'مفتوح'
-        })
+        return jsonify({'success': True, 'message': 'مقفول' if is_blocked else 'مفتوح'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -340,12 +358,10 @@ def get_video_views(video_id):
 
         views_res = supabase.table('video_views').select('*').eq('video_id', video_id).execute()
         views = views_res.data or []
-
         if views:
             student_ids = [v['student_id'] for v in views]
             students_res = supabase.table('students').select('id, name').in_('id', student_ids).execute()
             students_map = {s['id']: s['name'] for s in (students_res.data or [])}
-
             for v in views:
                 v['student_name'] = students_map.get(v['student_id'], 'غير معروف')
 
