@@ -55,6 +55,7 @@ from routes.upload import upload_bp
 from routes.admin import admin_bp
 from routes.honor import honor_bp
 from routes.devices import devices_bp
+from routes.documents import documents_bp
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(students_bp)
@@ -71,6 +72,7 @@ app.register_blueprint(upload_bp)
 app.register_blueprint(admin_bp)
 app.register_blueprint(honor_bp)
 app.register_blueprint(devices_bp)
+app.register_blueprint(documents_bp)
 
 # ============ Basic Routes ============
 
