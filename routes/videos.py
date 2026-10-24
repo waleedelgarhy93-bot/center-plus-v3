@@ -29,6 +29,21 @@ def _get_video_group_ids(video_id):
     return [r['group_id'] for r in (res.data or [])]
 
 
+
+def _enrich_categories(items):
+    if not items:
+        return items
+    cat_ids = list({it.get('category_id') for it in items if it.get('category_id')})
+    if cat_ids:
+        cats_res = supabase.table('categories').select('id, name').in_('id', cat_ids).execute()
+        cats_map = {c['id']: c['name'] for c in (cats_res.data or [])}
+        for it in items:
+            it['category_name'] = cats_map.get(it.get('category_id'))
+    else:
+        for it in items:
+            it['category_name'] = None
+    return items
+
 def _enrich_videos_with_groups(videos):
     """إضافة group_ids وgroup_names لكل فيديو في القائمة"""
     if not videos:
@@ -85,6 +100,7 @@ def get_videos():
                 v['subject_name'] = subjects_map.get(v.get('subject_id'))
 
             videos = _enrich_videos_with_groups(videos)
+            videos = _enrich_categories(videos)
 
         return jsonify({'success': True, 'count': len(videos), 'videos': videos})
     except Exception as e:
@@ -114,6 +130,7 @@ def create_video():
             'description': data.get('description'),
             'video_url': video_url,
             'subject_id': data.get('subject_id'),
+            'category_id': int(data['category_id']) if data.get('category_id') else None,
             'group_id': group_ids[0] if group_ids else None,  # الأول للتوافق
             'teacher_id': request.user_id,
             'max_views': data.get('max_views', 0),
@@ -143,7 +160,7 @@ def update_video(video_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'video_url', 'subject_id', 'max_views']:
+        for field in ['title', 'description', 'video_url', 'subject_id', 'category_id', 'max_views']:
             if field in data:
                 update_data[field] = data[field]
 
@@ -266,6 +283,7 @@ def get_student_videos():
             for v in result:
                 v['subject_name'] = subjects_map.get(v.get('subject_id'))
 
+        result = _enrich_categories(result)
         return jsonify({'success': True, 'count': len(result), 'videos': result})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

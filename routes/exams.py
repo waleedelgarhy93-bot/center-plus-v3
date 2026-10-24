@@ -29,6 +29,21 @@ def _get_exam_group_ids(exam_id):
     return [r['group_id'] for r in (res.data or [])]
 
 
+
+def _enrich_categories(items):
+    if not items:
+        return items
+    cat_ids = list({it.get('category_id') for it in items if it.get('category_id')})
+    if cat_ids:
+        cats_res = supabase.table('categories').select('id, name').in_('id', cat_ids).execute()
+        cats_map = {c['id']: c['name'] for c in (cats_res.data or [])}
+        for it in items:
+            it['category_name'] = cats_map.get(it.get('category_id'))
+    else:
+        for it in items:
+            it['category_name'] = None
+    return items
+
 def _enrich_exams_with_groups(exams):
     if not exams:
         return exams
@@ -111,6 +126,7 @@ def create_exam():
             'description': data.get('description'),
             'group_id': group_ids[0] if group_ids else None,
             'subject_id': data.get('subject_id'),
+            'category_id': int(data['category_id']) if data.get('category_id') else None,
             'teacher_id': request.user_id,
             'max_grade': data.get('max_grade', 100),
             'duration_minutes': data.get('duration_minutes', 0),
@@ -171,7 +187,7 @@ def update_exam(exam_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'subject_id', 'max_grade',
+        for field in ['title', 'description', 'subject_id', 'category_id', 'max_grade',
                       'duration_minutes', 'show_result', 'has_essay', 'essay_prompt',
                       'essay_max_grade', 'is_published', 'exam_type', 'external_link']:
             if field in data:
@@ -352,11 +368,8 @@ def get_student_exams():
             else:
                 exam['my_status'] = 'not_submitted'
 
-        return jsonify({
-            'success': True,
-            'count': len(exams),
-            'exams': exams
-        })
+        exams = _enrich_categories(exams)
+        return jsonify({'success': True, 'count': len(exams), 'exams': exams})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 

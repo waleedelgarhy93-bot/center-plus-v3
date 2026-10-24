@@ -23,6 +23,21 @@ def _save_document_groups(document_id, group_ids, tenant_id):
         supabase.table('document_groups').insert(rows).execute()
 
 
+
+def _enrich_categories(items):
+    if not items:
+        return items
+    cat_ids = list({it.get('category_id') for it in items if it.get('category_id')})
+    if cat_ids:
+        cats_res = supabase.table('categories').select('id, name').in_('id', cat_ids).execute()
+        cats_map = {c['id']: c['name'] for c in (cats_res.data or [])}
+        for it in items:
+            it['category_name'] = cats_map.get(it.get('category_id'))
+    else:
+        for it in items:
+            it['category_name'] = None
+    return items
+
 def _enrich_documents_with_groups(documents):
     if not documents:
         return documents
@@ -77,7 +92,9 @@ def get_documents():
                 d['subject_name'] = subjects_map.get(d.get('subject_id'))
 
             documents = _enrich_documents_with_groups(documents)
+            documents = _enrich_categories(documents)
 
+        documents = _enrich_categories(documents)
         return jsonify({'success': True, 'count': len(documents), 'documents': documents})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -105,6 +122,7 @@ def create_document():
             'description': data.get('description'),
             'file_url': file_url,
             'subject_id': data.get('subject_id'),
+            'category_id': int(data['category_id']) if data.get('category_id') else None,
             'group_id': group_ids[0] if group_ids else None,
             'teacher_id': request.user_id,
             'tenant_id': tenant_id,
@@ -256,6 +274,7 @@ def get_student_documents():
             for d in documents:
                 d['subject_name'] = subjects_map.get(d.get('subject_id'))
 
+        documents = _enrich_categories(documents)
         return jsonify({'success': True, 'count': len(documents), 'documents': documents})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
