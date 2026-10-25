@@ -245,6 +245,9 @@ def add_question(exam_id):
         if not question_text:
             return jsonify({'success': False, 'error': 'question_text مطلوب'}), 400
 
+        tenant_id = exam_res.data[0].get('tenant_id')
+        topic = data.get('topic')
+        difficulty = data.get('difficulty', 'medium')
         new_q = supabase.table('questions').insert({
             'exam_id': exam_id,
             'question_text': question_text,
@@ -255,8 +258,33 @@ def add_question(exam_id):
             'order_index': data.get('order_index', 0),
             'question_image_url': data.get('question_image_url'),
             'correct_answer_image_url': data.get('correct_answer_image_url'),
-            'tenant_id': exam_res.data[0].get('tenant_id'),
+            'topic': topic,
+            'difficulty': difficulty,
+            'tenant_id': tenant_id,
         }).execute()
+
+        # إذا طلب حفظ السؤال في بنك الأسئلة
+        if data.get('save_to_bank'):
+            try:
+                e_data = supabase.table('exams').select('subject_id, category_id').eq('id', exam_id).execute()
+                sub_id = e_data.data[0].get('subject_id') if e_data.data else None
+                cat_id = e_data.data[0].get('category_id') if e_data.data else None
+                supabase.table('question_bank').insert({
+                    'tenant_id': tenant_id,
+                    'subject_id': sub_id,
+                    'category_id': cat_id,
+                    'topic': topic,
+                    'difficulty': difficulty,
+                    'question_text': question_text,
+                    'question_type': data.get('question_type', 'mcq'),
+                    'options': data.get('options'),
+                    'correct_answer': data.get('correct_answer'),
+                    'points': data.get('points', 1),
+                    'question_image_url': data.get('question_image_url'),
+                    'correct_answer_image_url': data.get('correct_answer_image_url'),
+                }).execute()
+            except Exception as bank_err:
+                print('Error auto-saving to bank:', bank_err)
 
         return jsonify({'success': True, 'question': new_q.data[0] if new_q.data else None}), 201
     except Exception as e:
