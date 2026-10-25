@@ -231,29 +231,27 @@ def get_student_documents():
             return jsonify({'success': False, 'error': 'الطالب غير موجود'}), 404
 
         student = student_res.data[0]
-        group_id = student.get('group_id')
+        primary_group_id = student.get('group_id')
         student_tenant = student.get('tenant_id')
 
-        subject_id = None
-        if group_id:
-            group_res = supabase.table('groups').select('subject_id').eq('id', group_id).execute()
-            if group_res.data:
-                subject_id = group_res.data[0].get('subject_id')
+        # جلب كل مجموعات الطالب من student_groups
+        sg_res = supabase.table('student_groups').select('group_id').eq('student_id', request.user_id).execute()
+        student_group_ids = [r['group_id'] for r in (sg_res.data or []) if r.get('group_id')]
+        if primary_group_id and primary_group_id not in student_group_ids:
+            student_group_ids.append(primary_group_id)
 
-        # جلب IDs المذكرات المخصصة لمجموعة الطالب عبر document_groups
+        # جلب IDs المذكرات المخصصة لأي من مجموعات الطالب عبر document_groups
         dg_doc_ids = []
-        if group_id:
-            dg_res = supabase.table('document_groups').select('document_id').eq('group_id', group_id).execute()
+        if student_group_ids:
+            dg_res = supabase.table('document_groups').select('document_id').in_('group_id', student_group_ids).execute()
             dg_doc_ids = [r['document_id'] for r in (dg_res.data or [])]
 
         query = supabase.table('documents').select('*').eq('tenant_id', student_tenant)
 
-        if group_id and subject_id:
-            query = query.or_(f'group_id.eq.{group_id},subject_id.eq.{subject_id},group_id.is.null')
-        elif group_id:
-            query = query.or_(f'group_id.eq.{group_id},group_id.is.null')
-        elif subject_id:
-            query = query.or_(f'subject_id.eq.{subject_id},subject_id.is.null')
+        if student_group_ids:
+            query = query.or_(f"group_id.is.null,group_id.in.({','.join(map(str, student_group_ids))})")
+        else:
+            query = query.or_('group_id.is.null')
 
         docs_res = query.order('created_at', desc=True).execute()
         documents = docs_res.data or []

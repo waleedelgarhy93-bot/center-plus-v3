@@ -143,7 +143,17 @@ def get_group_attendance_today(group_id):
         if not check_tenant_ownership(group_res.data[0]):
             return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
-        students_res = supabase.table('students').select('*').eq('group_id', group_id).execute()
+        sg_res = supabase.table('student_groups').select('student_id').eq('group_id', group_id).execute()
+        sg_student_ids = [r['student_id'] for r in (sg_res.data or [])]
+
+        query = supabase.table('students').select('*')
+        query = apply_tenant_filter(query)
+        if sg_student_ids:
+            query = query.or_(f"group_id.eq.{group_id},id.in.({','.join(map(str, sg_student_ids))})")
+        else:
+            query = query.eq('group_id', group_id)
+
+        students_res = query.order('name', desc=False).execute()
         students = students_res.data or []
 
         attendance_res = supabase.table('attendance')\
@@ -207,7 +217,17 @@ def smart_check_in():
         if not check_tenant_ownership(student):
             return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
-        if student.get('group_id') != group_id:
+        is_in_group = (student.get('group_id') == group_id)
+        if not is_in_group:
+            sg_check = supabase.table('student_groups')\
+                .select('id')\
+                .eq('student_id', student['id'])\
+                .eq('group_id', group_id)\
+                .execute()
+            if sg_check.data:
+                is_in_group = True
+
+        if not is_in_group:
             return jsonify({
                 'success': False,
                 'error': f"الطالب {student['name']} ليس في هذه المجموعة"

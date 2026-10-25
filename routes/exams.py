@@ -317,29 +317,28 @@ def get_student_exams():
             return jsonify({'success': False, 'error': 'الطالب غير موجود'}), 404
 
         student = student_res.data[0]
-        group_id = student.get('group_id')
-        subject_id = None
+        primary_group_id = student.get('group_id')
+        student_tenant = student.get('tenant_id')
 
-        if group_id:
-            group_res = supabase.table('groups').select('subject_id').eq('id', group_id).execute()
-            if group_res.data:
-                subject_id = group_res.data[0].get('subject_id')
+        # جلب كل مجموعات الطالب من student_groups
+        sg_res = supabase.table('student_groups').select('group_id').eq('student_id', request.user_id).execute()
+        student_group_ids = [r['group_id'] for r in (sg_res.data or []) if r.get('group_id')]
+        if primary_group_id and primary_group_id not in student_group_ids:
+            student_group_ids.append(primary_group_id)
 
         query = supabase.table('exams').select('*').eq('is_published', True)
-        if student.get('tenant_id'):
-            query = query.eq('tenant_id', student['tenant_id'])
+        if student_tenant:
+            query = query.eq('tenant_id', student_tenant)
 
-        if group_id and subject_id:
-            query = query.or_(f'group_id.eq.{group_id},subject_id.eq.{subject_id}')
-        elif group_id:
-            query = query.eq('group_id', group_id)
-        elif subject_id:
-            query = query.eq('subject_id', subject_id)
+        if student_group_ids:
+            query = query.or_(f"group_id.is.null,group_id.in.({','.join(map(str, student_group_ids))})")
+        else:
+            query = query.or_('group_id.is.null')
 
-        # جلب الاختبارات عبر exam_groups
+        # جلب الاختبارات عبر exam_groups لأي من مجموعات الطالب
         eg_exam_ids = []
-        if group_id:
-            eg_res = supabase.table('exam_groups').select('exam_id').eq('group_id', group_id).execute()
+        if student_group_ids:
+            eg_res = supabase.table('exam_groups').select('exam_id').in_('group_id', student_group_ids).execute()
             eg_exam_ids = [r['exam_id'] for r in (eg_res.data or [])]
 
         exams_res = query.order('created_at', desc=True).execute()
