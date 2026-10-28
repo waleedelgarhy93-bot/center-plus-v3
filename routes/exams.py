@@ -53,8 +53,17 @@ def _enrich_exams_with_groups(exams):
     all_group_ids = list({r['group_id'] for r in eg_data})
     groups_map = {}
     if all_group_ids:
-        grps = supabase.table('groups').select('id, grade, center').in_('id', all_group_ids).execute()
-        groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps.data or [])}
+        grps = supabase.table('groups').select('id, grade, center, subject_id').in_('id', all_group_ids).execute()
+        grps_data = grps.data or []
+        sub_ids = list({g['subject_id'] for g in grps_data if g.get('subject_id')})
+        subs_map = {}
+        if sub_ids:
+            s_res = supabase.table('subjects').select('id, name').in_('id', sub_ids).execute()
+            subs_map = {s['id']: s['name'] for s in (s_res.data or [])}
+        groups_map = {
+            g['id']: f"{g['grade']} - {g['center']}" + (f" ({subs_map[g['subject_id']]})" if g.get('subject_id') in subs_map else "")
+            for g in grps_data
+        }
     exam_groups_map = {}
     for r in eg_data:
         eid = r['exam_id']
