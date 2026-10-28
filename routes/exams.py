@@ -660,7 +660,7 @@ def get_exam_submissions(exam_id):
         if submissions:
             student_ids = [s['student_id'] for s in submissions]
             students_res = supabase.table('students')\
-                .select('id, name, barcode')\
+                .select('id, name, barcode, phone, parent_phone')\
                 .in_('id', student_ids)\
                 .execute()
             students_map = {s['id']: s for s in (students_res.data or [])}
@@ -669,6 +669,8 @@ def get_exam_submissions(exam_id):
                 student = students_map.get(s['student_id'], {})
                 s['student_name'] = student.get('name', 'غير معروف')
                 s['student_barcode'] = student.get('barcode')
+                s['student_phone'] = student.get('phone')
+                s['parent_phone'] = student.get('parent_phone')
 
         essay_count_res = supabase.table('questions')\
             .select('id')\
