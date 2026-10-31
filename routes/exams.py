@@ -990,67 +990,46 @@ def _recalculate_submission_grade(submission_id):
 @exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
 @token_required
 def generate_ai_quiz():
-    """
-    توليد بنك أسئلة واختبار بالذكاء الاصطناعي من عنوان الحصة أو الشرح أو الموضوع
-    يدعم الرياضيات والفيزياء بدقة LaTeX واختيار لغة الرموز (إنجليزية أو عربية)
-    """
+    """توليد أسئلة واختبار بالذكاء الاصطناعي مع معادلات LaTeX"""
     try:
         data = request.get_json() or {}
         topic = data.get('topic', '').strip()
         video_title = data.get('video_title', '').strip()
         video_description = data.get('video_description', '').strip()
-        count = int(data.get('count', 5))
+        count = int(data.get('count', 3))
         difficulty = data.get('difficulty', 'medium')
         math_symbols = data.get('math_symbols', 'english')
         subject_name = data.get('subject_name', 'رياضيات')
 
-        count = max(1, min(count, 20))
+        count = max(1, min(count, 10))
 
-        context_text = f"المادة: {subject_name}\n"
-        if video_title:
-            context_text += f"عنوان حصة الفيديو: {video_title}\n"
+        context = f"المادة: {subject_name}. الدرس: {topic or video_title}."
         if video_description:
-            context_text += f"وصف ومحتوى الشرح: {video_description}\n"
-        if topic:
-            context_text += f"الموضوع والمفاهيم المطلوب التركيز عليها: {topic}\n"
+            context += f" تفاصيل الشرح: {video_description}."
 
-        if math_symbols == 'english':
-            symbols_instruction = """
-- استخدم الرموز الرياضية الإنجليزية القياسية مثل: x, y, z, f(x), \\lim, \\int, \\frac{dy}{dx}, \\theta.
-- لا تخلط الحروف العربية داخل المعادلة نفسها حتى لا تنعكس الأقواس.
-- اكتب أي معادلة أو متغير أو كسر أو جذر بصيغة LaTeX محاطة بعلامتي دولار، مثال: $f(x) = \\frac{x^2 - 1}{x - 1}$ أو $x = 3$.
-"""
-        else:
-            symbols_instruction = """
-- استخدم الرموز الرياضية العربية المقابلة: س، ص، ع، د(س)، نها، تكامل.
-- ضع التعبيرات الرياضية بصيغة LaTeX واضحة بين علامتي دولار.
-"""
+        symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \vec{v}, \int, \lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
 
-        prompt = f"""
-أنت أستاذ ومستشار خبير في وضع امتحانات الثانوية العامة والشهادات في مصر (رياضيات وفيزياء).
-مهمتك: توليد {count} أسئلة اختيار من متعدد (MCQ) فائقة الدقة والمطابقة لمعايير ونظام التقييم الحديث.
+        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} للثانوية العامة المصرية.
+المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمستوى {difficulty}.
+بيانات الدرس: {context}
 
-بيانات الدرس والحصة:
-{context_text}
-مستوى الصعوبة المطلوب: {difficulty} (مستويات تفكير وفهم وتطبيق).
+قواعد المعادلات والرموز:
+- {symbols_rule}
+- ضع أي معادلة أو تعبير رياضي بين علامتي دولار بصيغة LaTeX واضحة ونظيفة، مثل: $f(x) = \sqrt{{x^2 + 1}}$
+- كل سؤال يحتوي على 4 اختيارات.
+- حدد correct_option_index (0 أو 1 أو 2 أو 3).
+- اكتب شرح خطوات الحل في explanation.
 
-قواعد صياغة المعادلات والرياضيات:
-{symbols_instruction}
-- كل سؤال يجب أن يحتوي على 4 اختيارات بالضبط (أ، ب، ج، د).
-- حدد مؤشر الإجابة الصحيحة بدقة (0 أو 1 أو 2 أو 3) ليتطابق مع مصفوفة الاختيارات.
-- اكتب تفسيراً وخطوات حل نموذجية ومبسطة للسؤال في حقل explanation.
-
-يجب أن يكون الرد بتنسيق JSON الصافي فقط (مصفوفة JSON) بدون أي مقدمات أو علامات تزيين، بالشكل التالي:
+أجب بمصفوفة JSON الصافية التالية فقط بدون أي كلام إضافي:
 [
   {{
-    "question": "نص السؤال الرياضي متضمناً المعادلات بين $ مثل: إذا كانت $f(x) = x^2 + 3x$ فإن $f'(2)$ تساوي:",
-    "options": ["$7$", "$10$", "$5$", "$12$"],
+    "question": "نص السؤال الرياضي متضمنا المعادلات بين $",
+    "options": ["اختيار أ", "اختيار ب", "اختيار ج", "اختيار د"],
     "correct_option_index": 0,
     "points": 2,
-    "explanation": "خطوات الحل: المشتقة الأولى $f'(x) = 2x + 3$، بالتعويض عن $x = 2$ نجد أن $f'(2) = 2(2) + 3 = 7$."
+    "explanation": "خطوات الحل التفصيلية مع المعادلات بين $"
   }}
-]
-"""
+]"""
 
         model = get_gemini_model()
         response = model.generate_content(prompt)
@@ -1076,7 +1055,8 @@ def generate_ai_quiz():
             'questions': questions
         })
     except Exception as e:
+        print(f"AI Quiz Error: {e}")
         return jsonify({
             'success': False,
-            'error': f'فشل توليد الأسئلة بالذكاء الاصطناعي: {str(e)}'
+            'error': f'فشل توليد الأسئلة: {str(e)}'
         }), 500
