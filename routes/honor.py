@@ -120,7 +120,7 @@ def get_leaderboard():
                 }
 
         # جلب الطلاب (مفلتر حسب السنتر)
-        query = supabase.table('students').select('id, name, barcode, group_id')
+        query = supabase.table('students').select('id, name, barcode, group_id, phone, parent_phone')
         query = apply_tenant_filter(query)
         students = query.execute().data or []
 
@@ -139,6 +139,8 @@ def get_leaderboard():
                 'student_id': s['id'],
                 'student_name': s['name'],
                 'student_barcode': s.get('barcode'),
+                'phone': s.get('phone'),
+                'parent_phone': s.get('parent_phone'),
                 'group_name': groups_map.get(s.get('group_id'), '—'),
                 **score_data,
             })
@@ -208,15 +210,17 @@ def get_my_rank():
         all_scores.sort(key=lambda x: x['score'], reverse=True)
         my_rank = next((i + 1 for i, s in enumerate(all_scores) if s['id'] == student_id), 0)
 
-        # جلب أعلى 3 طلاب (للمقارنة)
-        top_3 = []
-        for i, s in enumerate(all_scores[:3]):
-            student_info = supabase.table('students').select('name').eq('id', s['id']).execute()
+        # جلب أعلى 10 طلاب في لوحة الشرف
+        top_10 = []
+        for i, s in enumerate(all_scores[:10]):
+            student_info = supabase.table('students').select('name, phone, parent_phone').eq('id', s['id']).execute()
             if student_info.data:
-                top_3.append({
+                top_10.append({
                     'rank': i + 1,
                     'student_name': student_info.data[0]['name'],
                     'score': s['score'],
+                    'phone': student_info.data[0].get('phone'),
+                    'parent_phone': student_info.data[0].get('parent_phone'),
                 })
 
         return jsonify({
@@ -224,7 +228,8 @@ def get_my_rank():
             'my_rank': my_rank,
             'my_score': my_score,
             'total_students': len(all_scores),
-            'top_3': top_3,
+            'top_3': top_10[:3],
+            'top_10': top_10,
         })
 
     except Exception as e:
