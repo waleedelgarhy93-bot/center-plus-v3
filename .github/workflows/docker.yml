@@ -34,3 +34,4 @@ jobs:
           tags: |
             ghcr.io/waleedelgarhy93-bot/centerbackend:latest
             ghcr.io/waleedelgarhy93-bot/centerbackend:v2
+            ghcr.io/waleedelgarhy93-bot/centerbackend:v3
