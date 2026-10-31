@@ -1,4 +1,4 @@
-﻿# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
+# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
 from flask import Blueprint, jsonify, request
 import json
 import re
@@ -983,3 +983,100 @@ def _recalculate_submission_grade(submission_id):
         print(f"⚠️ فشل حساب الدرجة: {e}")
         return 0
 
+
+
+# ============ AI Quiz Generation Endpoint ============
+
+@exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
+@token_required
+def generate_ai_quiz():
+    """
+    توليد بنك أسئلة واختبار بالذكاء الاصطناعي من عنوان الحصة أو الشرح أو الموضوع
+    يدعم الرياضيات والفيزياء بدقة LaTeX واختيار لغة الرموز (إنجليزية أو عربية)
+    """
+    try:
+        data = request.get_json() or {}
+        topic = data.get('topic', '').strip()
+        video_title = data.get('video_title', '').strip()
+        video_description = data.get('video_description', '').strip()
+        count = int(data.get('count', 5))
+        difficulty = data.get('difficulty', 'medium')
+        math_symbols = data.get('math_symbols', 'english')
+        subject_name = data.get('subject_name', 'رياضيات')
+
+        count = max(1, min(count, 20))
+
+        context_text = f"المادة: {subject_name}\n"
+        if video_title:
+            context_text += f"عنوان حصة الفيديو: {video_title}\n"
+        if video_description:
+            context_text += f"وصف ومحتوى الشرح: {video_description}\n"
+        if topic:
+            context_text += f"الموضوع والمفاهيم المطلوب التركيز عليها: {topic}\n"
+
+        if math_symbols == 'english':
+            symbols_instruction = """
+- استخدم الرموز الرياضية الإنجليزية القياسية مثل: x, y, z, f(x), \\lim, \\int, \\frac{dy}{dx}, \\theta.
+- لا تخلط الحروف العربية داخل المعادلة نفسها حتى لا تنعكس الأقواس.
+- اكتب أي معادلة أو متغير أو كسر أو جذر بصيغة LaTeX محاطة بعلامتي دولار، مثال: $f(x) = \\frac{x^2 - 1}{x - 1}$ أو $x = 3$.
+"""
+        else:
+            symbols_instruction = """
+- استخدم الرموز الرياضية العربية المقابلة: س، ص، ع، د(س)، نها، تكامل.
+- ضع التعبيرات الرياضية بصيغة LaTeX واضحة بين علامتي دولار.
+"""
+
+        prompt = f"""
+أنت أستاذ ومستشار خبير في وضع امتحانات الثانوية العامة والشهادات في مصر (رياضيات وفيزياء).
+مهمتك: توليد {count} أسئلة اختيار من متعدد (MCQ) فائقة الدقة والمطابقة لمعايير ونظام التقييم الحديث.
+
+بيانات الدرس والحصة:
+{context_text}
+مستوى الصعوبة المطلوب: {difficulty} (مستويات تفكير وفهم وتطبيق).
+
+قواعد صياغة المعادلات والرياضيات:
+{symbols_instruction}
+- كل سؤال يجب أن يحتوي على 4 اختيارات بالضبط (أ، ب، ج، د).
+- حدد مؤشر الإجابة الصحيحة بدقة (0 أو 1 أو 2 أو 3) ليتطابق مع مصفوفة الاختيارات.
+- اكتب تفسيراً وخطوات حل نموذجية ومبسطة للسؤال في حقل explanation.
+
+يجب أن يكون الرد بتنسيق JSON الصافي فقط (مصفوفة JSON) بدون أي مقدمات أو علامات تزيين، بالشكل التالي:
+[
+  {{
+    "question": "نص السؤال الرياضي متضمناً المعادلات بين $ مثل: إذا كانت $f(x) = x^2 + 3x$ فإن $f'(2)$ تساوي:",
+    "options": ["$7$", "$10$", "$5$", "$12$"],
+    "correct_option_index": 0,
+    "points": 2,
+    "explanation": "خطوات الحل: المشتقة الأولى $f'(x) = 2x + 3$، بالتعويض عن $x = 2$ نجد أن $f'(2) = 2(2) + 3 = 7$."
+  }}
+]
+"""
+
+        model = get_gemini_model()
+        response = model.generate_content(prompt)
+        res_text = response.text.strip()
+
+        if res_text.startswith('```json'):
+            res_text = res_text[7:]
+        elif res_text.startswith('```'):
+            res_text = res_text[3:]
+        if res_text.endswith('```'):
+            res_text = res_text[:-3]
+        res_text = res_text.strip()
+
+        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+        if json_match:
+            questions = json.loads(json_match.group())
+        else:
+            questions = json.loads(res_text)
+
+        return jsonify({
+            'success': True,
+            'count': len(questions),
+            'questions': questions
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'فشل توليد الأسئلة بالذكاء الاصطناعي: {str(e)}'
+        }), 500
