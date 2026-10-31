@@ -412,3 +412,129 @@ def get_group_students(group_id):
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============ Student Activity & Online Tracker ============
+
+@students_bp.route('/api/students/activity-tracker', methods=['GET'])
+@token_required
+def get_students_activity_tracker():
+    """
+    لوحة متابعة نشاط وتواجد الطلاب للمعلم
+    من متواجد أونلاين الآن، من دخل اليوم، ومن غائب
+    """
+    try:
+        from datetime import datetime, timezone
+
+        tenant_id = get_current_tenant_id()[0]
+
+        # 1. جلب جميع الطلاب في السنتر
+        query = supabase.table('students').select('id, name, barcode, phone, parent_phone, group_id')
+        query = apply_tenant_filter(query)
+        students_res = query.order('name', desc=False).execute()
+        students_data = students_res.data or []
+
+        # جلب أسماء المجموعات
+        group_ids = list({s.get('group_id') for s in students_data if s.get('group_id')})
+        groups_map = {}
+        if group_ids:
+            grps_res = supabase.table('groups').select('id, grade, center').in_('id', group_ids).execute()
+            groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps_res.data or [])}
+
+        # 2. جلب جلسات الطلاب من active_sessions
+        sessions_query = supabase.table('active_sessions')\
+            .select('user_id, last_active, is_active')\
+            .eq('user_type', 'student')
+        if tenant_id:
+            sessions_query = sessions_query.eq('tenant_id', tenant_id)
+
+        sessions_res = sessions_query.execute()
+        sessions = sessions_res.data or []
+
+        # دمج أحدث نشاط لكل طالب
+        latest_active_map = {}
+        for sess in sessions:
+            uid = sess.get('user_id')
+            la_str = sess.get('last_active')
+            if uid and la_str:
+                if uid not in latest_active_map or la_str > latest_active_map[uid]:
+                    latest_active_map[uid] = la_str
+
+        now_utc = datetime.now(timezone.utc)
+        today_start = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc)
+
+        enriched_students = []
+        online_count = 0
+        active_today_count = 0
+        dormant_count = 0
+
+        for s in students_data:
+            sid = s['id']
+            last_active_str = latest_active_map.get(sid)
+            is_online = False
+            is_today = False
+            days_inactive = None
+            last_active_formatted = 'لم يسجل دخول بعد'
+
+            if last_active_str:
+                try:
+                    # تحويل التاريخ
+                    clean_iso = last_active_str.replace('Z', '+00:00')
+                    dt = datetime.fromisoformat(clean_iso)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+
+                    diff_sec = (now_utc - dt).total_seconds()
+                    days_inactive = int(diff_sec // 86400)
+
+                    # نشط خلال آخر 15 دقيقة = أونلاين الآن
+                    if diff_sec <= 900:
+                        is_online = True
+                        online_count += 1
+
+                    # نشط اليوم
+                    if dt >= today_start:
+                        is_today = True
+                        active_today_count += 1
+
+                    if days_inactive >= 3:
+                        dormant_count += 1
+
+                    last_active_formatted = dt.strftime('%Y-%m-%d %I:%M %p')
+                except Exception:
+                    pass
+            else:
+                dormant_count += 1
+
+            enriched_students.append({
+                'id': sid,
+                'name': s['name'],
+                'barcode': s.get('barcode'),
+                'phone': s.get('phone'),
+                'parent_phone': s.get('parent_phone'),
+                'group_id': s.get('group_id'),
+                'group_name': groups_map.get(s.get('group_id'), 'غير محدد'),
+                'last_active': last_active_str,
+                'last_active_formatted': last_active_formatted,
+                'is_online': is_online,
+                'is_active_today': is_today,
+                'days_inactive': days_inactive,
+            })
+
+        # ترتيب: الأونلاين أولاً، ثم النشطين اليوم، ثم الباقي
+        enriched_students.sort(key=lambda x: (not x['is_online'], not x['is_active_today'], x['days_inactive'] if x['days_inactive'] is not None else 9999))
+
+        return jsonify({
+            'success': True,
+            'summary': {
+                'total_students': len(enriched_students),
+                'online_now': online_count,
+                'active_today': active_today_count,
+                'inactive_today': len(enriched_students) - active_today_count,
+                'dormant_3days': dormant_count,
+            },
+            'students': enriched_students
+        })
+    except Exception as e:
+        print(f"Activity Tracker Error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500

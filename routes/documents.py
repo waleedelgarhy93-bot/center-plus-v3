@@ -1,20 +1,28 @@
-# routes/documents.py - المذكرات والملفات (PDF) + حماية وتوزيع على المجموعات
-import uuid
+# -*- coding: utf-8 -*-
+# routes/documents.py - المذكرات والكتب + تصنيف الفروع + حماية/تحميل الملفات
 from flask import Blueprint, jsonify, request
-from datetime import datetime
+import os
+import uuid
+from werkzeug.utils import secure_filename
+from supabase import create_client
 
 from db import supabase
 from helpers import (
     token_required,
     apply_tenant_filter,
     get_tenant_for_insert,
+    get_current_tenant_id,
     check_tenant_ownership,
 )
 
 documents_bp = Blueprint('documents', __name__)
 
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads', 'documents')
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ALLOWED_EXTENSIONS = {'pdf'}
 
-# ============ Helper: حفظ وتجميع مجموعات المذكرة ============
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def _save_document_groups(document_id, group_ids, tenant_id):
     supabase.table('document_groups').delete().eq('document_id', document_id).execute()
@@ -22,7 +30,9 @@ def _save_document_groups(document_id, group_ids, tenant_id):
         rows = [{'document_id': document_id, 'group_id': gid, 'tenant_id': tenant_id} for gid in group_ids]
         supabase.table('document_groups').insert(rows).execute()
 
-
+def _get_document_group_ids(document_id):
+    res = supabase.table('document_groups').select('group_id').eq('document_id', document_id).execute()
+    return [r['group_id'] for r in (res.data or [])]
 
 def _enrich_categories(items):
     if not items:
@@ -41,17 +51,23 @@ def _enrich_categories(items):
 def _enrich_documents_with_groups(documents):
     if not documents:
         return documents
-
     doc_ids = [d['id'] for d in documents]
     dg_res = supabase.table('document_groups').select('document_id, group_id').in_('document_id', doc_ids).execute()
     dg_data = dg_res.data or []
-
     all_group_ids = list({r['group_id'] for r in dg_data})
     groups_map = {}
     if all_group_ids:
-        grps = supabase.table('groups').select('id, grade, center').in_('id', all_group_ids).execute()
-        groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (grps.data or [])}
-
+        grps = supabase.table('groups').select('id, grade, center, subject_id').in_('id', all_group_ids).execute()
+        grps_data = grps.data or []
+        sub_ids = list({g['subject_id'] for g in grps_data if g.get('subject_id')})
+        subs_map = {}
+        if sub_ids:
+            s_res = supabase.table('subjects').select('id, name').in_('id', sub_ids).execute()
+            subs_map = {s['id']: s['name'] for s in (s_res.data or [])}
+        groups_map = {
+            g['id']: f"{g['grade']} - {g['center']}" + (f" ({subs_map[g['subject_id']]})" if g.get('subject_id') in subs_map else "")
+            for g in grps_data
+        }
     doc_groups_map = {}
     for r in dg_data:
         did = r['document_id']
@@ -59,18 +75,24 @@ def _enrich_documents_with_groups(documents):
         if did not in doc_groups_map:
             doc_groups_map[did] = []
         doc_groups_map[did].append(gid)
-
     for d in documents:
         gids = doc_groups_map.get(d['id'], [])
         d['group_ids'] = gids
         d['group_names'] = [groups_map.get(gid, '') for gid in gids]
         d['group_id'] = gids[0] if gids else d.get('group_id')
-        d['group_name'] = groups_map.get(d.get('group_id')) if d.get('group_id') else None
-
+        d['group_name'] = groups_map.get(d['group_id']) if d.get('group_id') else None
     return documents
 
+def _parse_doc_download_flag(doc):
+    if not doc:
+        return doc
+    desc = doc.get('description') or ''
+    doc['is_downloadable'] = '[ALLOW_DOWNLOAD]' in desc
+    doc['description'] = desc.replace('[ALLOW_DOWNLOAD]', '').strip()
+    return doc
 
-# ============ Teacher CRUD ============
+
+# ============ Documents CRUD (Teacher) ============
 
 @documents_bp.route('/api/documents', methods=['GET'])
 @token_required
@@ -90,6 +112,7 @@ def get_documents():
 
             for d in documents:
                 d['subject_name'] = subjects_map.get(d.get('subject_id'))
+                _parse_doc_download_flag(d)
 
             documents = _enrich_documents_with_groups(documents)
             documents = _enrich_categories(documents)
@@ -117,9 +140,14 @@ def create_document():
         if not group_ids and data.get('group_id'):
             group_ids = [data['group_id']]
 
+        # معالجة خيار السماح بالتحميل
+        raw_desc = (data.get('description') or '').strip()
+        if data.get('allow_download') or data.get('is_downloadable'):
+            raw_desc = (raw_desc + ' [ALLOW_DOWNLOAD]').strip()
+
         new_doc = supabase.table('documents').insert({
             'title': title,
-            'description': data.get('description'),
+            'description': raw_desc if raw_desc else None,
             'file_url': file_url,
             'subject_id': data.get('subject_id'),
             'category_id': int(data['category_id']) if data.get('category_id') else None,
@@ -133,6 +161,7 @@ def create_document():
             _save_document_groups(doc['id'], group_ids, tenant_id)
             doc['group_ids'] = group_ids
 
+        _parse_doc_download_flag(doc)
         return jsonify({'success': True, 'message': 'تم إضافة المذكرة', 'document': doc}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -147,12 +176,12 @@ def get_document(doc_id):
             return jsonify({'success': False, 'error': 'المذكرة غير موجودة'}), 404
 
         doc = res.data[0]
-        # إضافة اسم المادة
         if doc.get('subject_id'):
             sub_res = supabase.table('subjects').select('name').eq('id', doc['subject_id']).execute()
             if sub_res.data:
                 doc['subject_name'] = sub_res.data[0]['name']
 
+        _parse_doc_download_flag(doc)
         return jsonify({'success': True, 'document': doc})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -181,66 +210,61 @@ def delete_document(doc_id):
 def upload_pdf():
     try:
         if 'file' not in request.files:
-            return jsonify({'success': False, 'error': 'الملف مطلوب'}), 400
+            return jsonify({'success': False, 'error': 'لم يتم اختيار ملف'}), 400
 
         file = request.files['file']
         if file.filename == '':
             return jsonify({'success': False, 'error': 'اسم الملف فارغ'}), 400
 
-        ext = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
-        if ext != 'pdf':
-            return jsonify({'success': False, 'error': 'يجب أن يكون الملف بصيغة PDF فقط'}), 400
+        if not allowed_file(file.filename):
+            return jsonify({'success': False, 'error': 'مسموح فقط بملفات PDF'}), 400
 
-        file.seek(0, 2)
-        file_size = file.tell()
-        file.seek(0)
+        ext = file.filename.rsplit('.', 1)[1].lower()
+        unique_name = f"doc_{uuid.uuid4().hex[:12]}.{ext}"
 
-        # الحد الأقصى 25 ميجابايت
-        if file_size > 25 * 1024 * 1024:
-            return jsonify({'success': False, 'error': 'حجم الملف أكبر من 25 MB'}), 400
+        file_bytes = file.read()
+        if len(file_bytes) > 25 * 1024 * 1024:
+            return jsonify({'success': False, 'error': 'حجم الملف أكبر من 25MB'}), 400
 
-        unique_name = f"booklets/{uuid.uuid4().hex}.pdf"
-        file_content = file.read()
-
-        supabase.storage.from_('exam-images').upload(
-            unique_name,
-            file_content,
-            file_options={'content-type': 'application/pdf'}
+        storage_path = f"documents/{unique_name}"
+        res = supabase.storage.from_('documents').upload(
+            path=storage_path,
+            file=file_bytes,
+            file_options={"content-type": "application/pdf"}
         )
 
-        public_url = supabase.storage.from_('exam-images').get_public_url(unique_name)
+        public_url = supabase.storage.from_('documents').get_public_url(storage_path)
 
         return jsonify({
             'success': True,
-            'url': public_url,
-            'path': unique_name,
-            'size': file_size
+            'file_url': public_url,
+            'filename': file.filename,
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        print(f"Upload PDF Error: {e}")
+        return jsonify({'success': False, 'error': f'فشل رفع الملف: {str(e)}'}), 500
 
 
-# ============ Student Documents ============
+# ============ Documents (Student) ============
 
 @documents_bp.route('/api/student/documents', methods=['GET'])
 @token_required
 def get_student_documents():
     try:
-        student_res = supabase.table('students').select('*').eq('id', request.user_id).execute()
+        student_res = supabase.table('students').select('group_id, tenant_id').eq('id', request.user_id).execute()
         if not student_res.data:
             return jsonify({'success': False, 'error': 'الطالب غير موجود'}), 404
 
-        student = student_res.data[0]
-        primary_group_id = student.get('group_id')
-        student_tenant = student.get('tenant_id')
+        student_info = student_res.data[0]
+        student_tenant = student_info.get('tenant_id')
+        primary_group_id = student_info.get('group_id')
 
-        # جلب كل مجموعات الطالب من student_groups
         sg_res = supabase.table('student_groups').select('group_id').eq('student_id', request.user_id).execute()
-        student_group_ids = [r['group_id'] for r in (sg_res.data or []) if r.get('group_id')]
+        student_group_ids = [r['group_id'] for r in (sg_res.data or [])]
+
         if primary_group_id and primary_group_id not in student_group_ids:
             student_group_ids.append(primary_group_id)
 
-        # جلب IDs المذكرات المخصصة لأي من مجموعات الطالب عبر document_groups
         dg_doc_ids = []
         if student_group_ids:
             dg_res = supabase.table('document_groups').select('document_id').in_('group_id', student_group_ids).execute()
@@ -271,6 +295,7 @@ def get_student_documents():
 
             for d in documents:
                 d['subject_name'] = subjects_map.get(d.get('subject_id'))
+                _parse_doc_download_flag(d)
 
         documents = _enrich_categories(documents)
         return jsonify({'success': True, 'count': len(documents), 'documents': documents})

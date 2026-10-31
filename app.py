@@ -77,6 +77,8 @@ app.register_blueprint(devices_bp)
 app.register_blueprint(documents_bp)
 app.register_blueprint(categories_bp)
 app.register_blueprint(question_bank_bp)
+from routes.live import live_bp
+app.register_blueprint(live_bp)
 
 # ============ Basic Routes ============
 

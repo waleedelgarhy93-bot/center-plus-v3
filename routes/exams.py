@@ -1060,3 +1060,47 @@ def generate_ai_quiz():
             'success': False,
             'error': f'فشل توليد الأسئلة: {str(e)}'
         }), 500
+
+
+# ============ AI Math Homework Hint Assistant ============
+
+@exams_bp.route('/api/ai/math-hint', methods=['POST'])
+@token_required
+def get_math_homework_hint():
+    """
+    مساعد حل مسائل الرياضيات والواجبات بالذكاء الاصطناعي
+    يقدم تلميحة ذكية ومفتاح الحل والخطوة الأولى دون إعطاء الناتج النهائي
+    """
+    try:
+        data = request.get_json() or {}
+        problem_text = data.get('problem', '').strip()
+        subject_name = data.get('subject', 'الرياضيات للثانوية العامة')
+
+        if not problem_text:
+            return jsonify({'success': False, 'error': 'يرجى كتابة نص المسألة'}), 400
+
+        prompt = f"""أنت معلم وموجه خبير للرياضيات للثانوية العامة المصرية بأسلوب أ. وليد الجارحي.
+الطالب يحاول حل هذه المسألة ويطلب مساعدة وتوجيهاً:
+المسألة:
+"{problem_text}"
+
+القواعد التربوية الإلزامية:
+1. ممنوع منعاً باتاً إعطاء الناتج النهائي أو الحل الكامل حتى لا يعتمد الطالب على الغش.
+2. حدد الفكرة الرياضية الأساسية للمسألة والقانون أو النظرية المستخدمة.
+3. وجّه الطالب إلى "الخطوة الأولى" للبدء بالحل (Socratic Hint).
+4. اكتب أي معادلة أو صيغة رياضية بدقة تامة بصيغة LaTeX محاطة بعلامتي دولار $ مثل: $f'(x) = 2x$.
+5. اجعل الشرح مختصراً وذكياً وفي نقاط واضحة بلهجة تشجيعية دافئة.
+
+أجب باللغة العربية مباشرة وبدون أي مقدمات طويلة."""
+
+        model = get_gemini_model()
+        response = model.generate_content(prompt)
+        hint_text = response.text.strip()
+
+        return jsonify({
+            'success': True,
+            'hint': hint_text
+        })
+    except Exception as e:
+        print(f"Math Hint Error: {e}")
+        return jsonify({'success': False, 'error': f'تعذر توليد التلميحة: {str(e)}'}), 500
