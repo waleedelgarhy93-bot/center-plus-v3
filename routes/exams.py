@@ -1004,7 +1004,7 @@ def _recalculate_submission_grade(submission_id):
 @exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
 @token_required
 def generate_ai_quiz():
-    """توليد أسئلة واختبار بالذكاء الاصطناعي مع معادلات LaTeX ودعم الأسئلة المقالية واختيار من متعدد حتى 30 سؤالاً"""
+    """توليد أسئلة واختبار بالذكاء الاصطناعي مع دعم قراءة الصور والـ PDF في الذاكرة دون تخزين"""
     try:
         data = request.get_json() or {}
         topic = data.get('topic', '').strip()
@@ -1013,20 +1013,24 @@ def generate_ai_quiz():
         count = int(data.get('count', 5))
         difficulty = data.get('difficulty', 'medium')
         math_symbols = data.get('math_symbols', 'english')
-        subject_name = data.get('subject_name', 'رياضيات')
+        subject_name = data.get('subject_name', 'رياضيات').strip()
         question_format = data.get('question_format', 'mcq')  # 'mcq', 'essay', or 'mixed'
+
+        # ملف مرفق (صورة أو PDF) يُقرأ في الذاكرة اللحظية فقط دون تخزين دائم
+        file_base64 = data.get('file_base64')
+        file_mime = data.get('file_mime')
 
         # السماح بما يصل إلى 30 سؤالاً
         count = max(1, min(count, 30))
 
-        context = f"المادة: {subject_name}. الدرس: {topic or video_title}."
+        context = f"المادة والمنهج: {subject_name}. الدرس / الموضوع: {topic or video_title}."
         if video_description:
-            context += f" تفاصيل الشرح: {video_description}."
+            context += f" تفاصيل وملاحظات إضافية: {video_description}."
 
         symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \\vec{v}, \\int, \\lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
 
         if question_format == 'essay':
-            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية رياضية دقيقة وذكية (حل بخطوات تفصيلية) مطابقة لمستوى {difficulty} للثانوية العامة المصرية.
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة وذكية (حل بخطوات تفصيلية) مطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
 لكل سؤال مقالي، اكتب نص المسألة وخطوات الإجابة النموذجية بالتفصيل وتوزيع الدرجات.
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
@@ -1042,7 +1046,7 @@ def generate_ai_quiz():
         elif question_format == 'mixed':
             mcq_count = max(1, count - 2) if count >= 4 else max(1, count - 1)
             essay_count = count - mcq_count
-            format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً:
+            format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً مطابقاً لمنهج ({subject_name}):
 - عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index (0 أو 1 أو 2 أو 3).
 - عدد {essay_count} سؤال مقالي رياضي يحتاج خطوات حل كاملة مع model_answer و rubric.
 مستوى الأسئلة: {difficulty}.
@@ -1066,7 +1070,7 @@ def generate_ai_quiz():
   }}
 ]"""
         else:
-            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمستوى {difficulty} للثانوية العامة المصرية.
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
 كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة.
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
@@ -1080,8 +1084,22 @@ def generate_ai_quiz():
   }}
 ]"""
 
-        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} للثانوية العامة المصرية بأسلوب أ. وليد الجارحي.
-بيانات الدرس: {context}
+        file_notice = ""
+        content_items = []
+        if file_base64 and file_mime:
+            try:
+                import base64
+                raw_bytes = base64.b64decode(file_base64)
+                content_items.append({
+                    'mime_type': file_mime,
+                    'data': raw_bytes
+                })
+                file_notice = "\nتنبيه هام جداً: مرفق مع الطلب صورة أو مستند PDF لمحتوى الدرس أو المنهج أو ورقة الأسئلة. اقرأ هذا المرفق بعناية تامة واعتمد عليه بشكل أساسي في توليد الأفكار والأسئلة لتكون مطابقة 100% للمرفق."
+            except Exception as fe:
+                print(f"Error decoding attached file: {fe}")
+
+        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} بأسلوب تعليمي رصين ودقيق.
+بيانات الدرس: {context} {file_notice}
 
 قواعد المعادلات والرموز:
 - {symbols_rule}
@@ -1090,8 +1108,10 @@ def generate_ai_quiz():
 {format_instructions}
 تذكر: أجب بمصفوفة JSON فقط بدون أي مقدمات أو كلام خارج الـ JSON."""
 
+        content_items.append(prompt)
+
         model = get_gemini_model()
-        response = model.generate_content(prompt)
+        response = model.generate_content(content_items if len(content_items) > 1 else prompt)
         res_text = response.text.strip()
 
         if res_text.startswith('```json'):
