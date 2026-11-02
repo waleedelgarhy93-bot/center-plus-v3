@@ -154,6 +154,20 @@ def create_exam():
             _save_exam_groups(exam['id'], group_ids, tenant_id)
             exam['group_ids'] = group_ids
 
+        # إشعار تلقائي للطلاب
+        try:
+            if data.get('is_published', True):
+                supabase.table('honor_notifications').insert({
+                    'tenant_id': tenant_id,
+                    'type': 'exam',
+                    'title': f'امتحان جديد: {title}',
+                    'message': f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!',
+                    'icon': '📝',
+                    'is_read': False
+                }).execute()
+        except Exception as _ne:
+            pass
+
         return jsonify({'success': True, 'message': 'تم إنشاء الاختبار', 'exam': exam}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -990,39 +1004,74 @@ def _recalculate_submission_grade(submission_id):
 @exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
 @token_required
 def generate_ai_quiz():
-    """توليد أسئلة واختبار بالذكاء الاصطناعي مع معادلات LaTeX"""
+    """توليد أسئلة واختبار بالذكاء الاصطناعي مع معادلات LaTeX ودعم الأسئلة المقالية واختيار من متعدد حتى 30 سؤالاً"""
     try:
         data = request.get_json() or {}
         topic = data.get('topic', '').strip()
         video_title = data.get('video_title', '').strip()
         video_description = data.get('video_description', '').strip()
-        count = int(data.get('count', 3))
+        count = int(data.get('count', 5))
         difficulty = data.get('difficulty', 'medium')
         math_symbols = data.get('math_symbols', 'english')
         subject_name = data.get('subject_name', 'رياضيات')
+        question_format = data.get('question_format', 'mcq')  # 'mcq', 'essay', or 'mixed'
 
-        count = max(1, min(count, 10))
+        # السماح بما يصل إلى 30 سؤالاً
+        count = max(1, min(count, 30))
 
         context = f"المادة: {subject_name}. الدرس: {topic or video_title}."
         if video_description:
             context += f" تفاصيل الشرح: {video_description}."
 
-        symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \vec{v}, \int, \lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
+        symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \\vec{v}, \\int, \\lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
 
-        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} للثانوية العامة المصرية.
-المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمستوى {difficulty}.
-بيانات الدرس: {context}
-
-قواعد المعادلات والرموز:
-- {symbols_rule}
-- ضع أي معادلة أو تعبير رياضي بين علامتي دولار بصيغة LaTeX واضحة ونظيفة، مثل: $f(x) = \sqrt{{x^2 + 1}}$
-- كل سؤال يحتوي على 4 اختيارات.
-- حدد correct_option_index (0 أو 1 أو 2 أو 3).
-- اكتب شرح خطوات الحل في explanation.
-
-أجب بمصفوفة JSON الصافية التالية فقط بدون أي كلام إضافي:
+        if question_format == 'essay':
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية رياضية دقيقة وذكية (حل بخطوات تفصيلية) مطابقة لمستوى {difficulty} للثانوية العامة المصرية.
+لكل سؤال مقالي، اكتب نص المسألة وخطوات الإجابة النموذجية بالتفصيل وتوزيع الدرجات.
+أجب بمصفوفة JSON الصافية التالية فقط:
 [
   {{
+    "type": "essay",
+    "question": "نص المسألة المقالية متضمنا المعادلات الرياضية بين علامات $",
+    "model_answer": "خطوات الإجابة النموذجية مع القوانين والتعويض",
+    "rubric": "توزيع الدرجات (مثال: درجة للقانون والتعويض، درجتان للتبسيط، درجة للناتج النهائي)",
+    "points": 4,
+    "explanation": "شرح الفكرة الرياضية ومفاتيح الحل"
+  }}
+]"""
+        elif question_format == 'mixed':
+            mcq_count = max(1, count - 2) if count >= 4 else max(1, count - 1)
+            essay_count = count - mcq_count
+            format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً:
+- عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index (0 أو 1 أو 2 أو 3).
+- عدد {essay_count} سؤال مقالي رياضي يحتاج خطوات حل كاملة مع model_answer و rubric.
+مستوى الأسئلة: {difficulty}.
+أجب بمصفوفة JSON الصافية التالية فقط:
+[
+  {{
+    "type": "mcq",
+    "question": "نص السؤال متضمنا المعادلات بين $",
+    "options": ["أ", "ب", "ج", "د"],
+    "correct_option_index": 0,
+    "points": 2,
+    "explanation": "شرح الحل"
+  }},
+  {{
+    "type": "essay",
+    "question": "نص المسألة المقالية",
+    "model_answer": "خطوات الحل النموذجية",
+    "rubric": "توزيع الدرجات",
+    "points": 4,
+    "explanation": "شرح خطوات الحل"
+  }}
+]"""
+        else:
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمستوى {difficulty} للثانوية العامة المصرية.
+كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة.
+أجب بمصفوفة JSON الصافية التالية فقط:
+[
+  {{
+    "type": "mcq",
     "question": "نص السؤال الرياضي متضمنا المعادلات بين $",
     "options": ["اختيار أ", "اختيار ب", "اختيار ج", "اختيار د"],
     "correct_option_index": 0,
@@ -1030,6 +1079,16 @@ def generate_ai_quiz():
     "explanation": "خطوات الحل التفصيلية مع المعادلات بين $"
   }}
 ]"""
+
+        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} للثانوية العامة المصرية بأسلوب أ. وليد الجارحي.
+بيانات الدرس: {context}
+
+قواعد المعادلات والرموز:
+- {symbols_rule}
+- ضع أي معادلة أو تعبير رياضي بين علامتي دولار بصيغة LaTeX واضحة ونظيفة، مثل: $f(x) = \\sqrt{{x^2 + 1}}$
+
+{format_instructions}
+تذكر: أجب بمصفوفة JSON فقط بدون أي مقدمات أو كلام خارج الـ JSON."""
 
         model = get_gemini_model()
         response = model.generate_content(prompt)
@@ -1048,6 +1107,13 @@ def generate_ai_quiz():
             questions = json.loads(json_match.group())
         else:
             questions = json.loads(res_text)
+
+        # التأكد من ملء الحقول الافتراضية
+        for q in questions:
+            if 'type' not in q:
+                q['type'] = 'essay' if ('options' not in q or not q['options']) else 'mcq'
+            if q['type'] == 'mcq' and ('options' not in q or not isinstance(q['options'], list)):
+                q['options'] = ["أ", "ب", "ج", "د"]
 
         return jsonify({
             'success': True,

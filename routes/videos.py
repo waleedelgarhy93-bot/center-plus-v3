@@ -199,6 +199,19 @@ def create_video():
             _save_video_groups(video['id'], group_ids, tenant_id)
             video['group_ids'] = group_ids
 
+        # إشعار تلقائي للطلاب
+        try:
+            supabase.table('honor_notifications').insert({
+                'tenant_id': tenant_id,
+                'type': 'video',
+                'title': f'حصة جديدة: {title}',
+                'message': f'تم رفع حصة فيديو جديدة بعنوان "{title}"، شاهد الحصة الآن.',
+                'icon': '🎥',
+                'is_read': False
+            }).execute()
+        except Exception as _ne:
+            pass
+
         return jsonify({'success': True, 'message': 'تم إضافة الفيديو', 'video': video}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500

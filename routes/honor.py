@@ -250,6 +250,11 @@ def get_notifications():
         query = apply_tenant_filter(query)
         notifications = query.execute().data or []
 
+        # إذا كان المستخدم طالباً، عرض الإشعارات العامة أو الخاصة به
+        if getattr(request, 'role', '') == 'student':
+            student_id = getattr(request, 'user_id', None)
+            notifications = [n for n in notifications if not n.get('student_id') or n.get('student_id') == student_id]
+
         # جلب أسماء الطلاب
         student_ids = list({n['student_id'] for n in notifications if n.get('student_id')})
         students_map = {}

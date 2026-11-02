@@ -162,6 +162,20 @@ def create_document():
             doc['group_ids'] = group_ids
 
         _parse_doc_download_flag(doc)
+
+        # إشعار تلقائي للطلاب
+        try:
+            supabase.table('honor_notifications').insert({
+                'tenant_id': tenant_id,
+                'type': 'document',
+                'title': f'مذكرة جديدة: {title}',
+                'message': f'تمت إضافة ملزمة ومذكرة جديدة بعنوان "{title}" للمراجعة.',
+                'icon': '📚',
+                'is_read': False
+            }).execute()
+        except Exception as _ne:
+            pass
+
         return jsonify({'success': True, 'message': 'تم إضافة المذكرة', 'document': doc}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
