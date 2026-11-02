@@ -1122,11 +1122,39 @@ def generate_ai_quiz():
             res_text = res_text[:-3]
         res_text = res_text.strip()
 
+        # استخراج وتنظيف الـ JSON لمعادلات LaTeX ورموز الهروب \
+        json_str = res_text
         json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
         if json_match:
-            questions = json.loads(json_match.group())
-        else:
-            questions = json.loads(res_text)
+            json_str = json_match.group()
+
+        questions = None
+        # 1. محاولة القراءة المباشرة
+        try:
+            questions = json.loads(json_str, strict=False)
+        except Exception:
+            pass
+
+        # 2. معالجة شرطات الـ LaTeX المائلة غير المهربة
+        if questions is None:
+            try:
+                # استبدال الـ backslash غير المتبوع بـ " بـ \\
+                sanitized = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)
+                questions = json.loads(sanitized, strict=False)
+            except Exception:
+                pass
+
+        if questions is None:
+            try:
+                # استبدال كل \ ليس بعدها "
+                sanitized2 = re.sub(r'\\(?!")', r'\\\\', json_str)
+                questions = json.loads(sanitized2, strict=False)
+            except Exception:
+                pass
+
+        # 3. إذا تعذر كل ما سبق، القراءة بـ json.loads لإظهار الخطأ الدقيق
+        if questions is None:
+            questions = json.loads(json_str)
 
         # التأكد من ملء الحقول الافتراضية
         for q in questions:
