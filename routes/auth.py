@@ -550,3 +550,62 @@ def dev_reset_password():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+# ============ Teacher / Center Settings ============
+
+@auth_bp.route('/api/teacher/settings', methods=['GET', 'PUT', 'OPTIONS'])
+@token_required
+def teacher_settings():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
+        if not user_res.data:
+            return jsonify({'success': False, 'error': 'المستخدم غير موجود'}), 404
+        user = user_res.data[0]
+        tenant_id = user.get('tenant_id')
+
+        if request.method == 'GET':
+            tenant = {}
+            if tenant_id:
+                t_res = supabase.table('tenants').select('*').eq('id', tenant_id).execute()
+                if t_res.data:
+                    tenant = t_res.data[0]
+            return jsonify({
+                'success': True,
+                'user': {
+                    'id': user['id'],
+                    'username': user['username'],
+                    'full_name': user.get('full_name') or user.get('username'),
+                    'phone': user.get('phone'),
+                },
+                'tenant': tenant
+            })
+
+        if request.method == 'PUT':
+            data = request.get_json() or {}
+            full_name = data.get('full_name')
+            phone = data.get('phone')
+            password = data.get('password')
+
+            user_updates = {}
+            if full_name: user_updates['full_name'] = full_name
+            if phone: user_updates['phone'] = phone
+            if password: user_updates['password'] = hash_password(password)
+
+            if user_updates:
+                supabase.table('users').update(user_updates).eq('id', request.user_id).execute()
+
+            # تحديث بيانات السنتر
+            tenant_name = data.get('center_name')
+            tenant_phone = data.get('center_phone')
+            if tenant_id and (tenant_name or tenant_phone):
+                t_updates = {}
+                if tenant_name: t_updates['name'] = tenant_name
+                if tenant_phone: t_updates['phone'] = tenant_phone
+                supabase.table('tenants').update(t_updates).eq('id', tenant_id).execute()
+
+            return jsonify({'success': True, 'message': 'تم حفظ الإعدادات بنجاح'})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500

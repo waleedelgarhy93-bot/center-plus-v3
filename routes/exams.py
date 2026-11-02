@@ -1,4 +1,4 @@
-﻿# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
+# routes/exams.py - الامتحانات + الأسئلة + التسليمات + AI Grading
 from flask import Blueprint, jsonify, request
 import json
 import re
@@ -153,6 +153,20 @@ def create_exam():
         if exam and group_ids:
             _save_exam_groups(exam['id'], group_ids, tenant_id)
             exam['group_ids'] = group_ids
+
+        # إشعار تلقائي للطلاب
+        try:
+            if data.get('is_published', True):
+                supabase.table('honor_notifications').insert({
+                    'tenant_id': tenant_id,
+                    'type': 'exam',
+                    'title': f'امتحان جديد: {title}',
+                    'message': f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!',
+                    'icon': '📝',
+                    'is_read': False
+                }).execute()
+        except Exception as _ne:
+            pass
 
         return jsonify({'success': True, 'message': 'تم إنشاء الاختبار', 'exam': exam}), 201
     except Exception as e:
@@ -983,3 +997,235 @@ def _recalculate_submission_grade(submission_id):
         print(f"⚠️ فشل حساب الدرجة: {e}")
         return 0
 
+
+
+# ============ AI Quiz Generation Endpoint ============
+
+@exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
+@token_required
+def generate_ai_quiz():
+    """توليد أسئلة واختبار بالذكاء الاصطناعي مع دعم قراءة الصور والـ PDF في الذاكرة دون تخزين"""
+    try:
+        data = request.get_json() or {}
+        topic = data.get('topic', '').strip()
+        video_title = data.get('video_title', '').strip()
+        video_description = data.get('video_description', '').strip()
+        count = int(data.get('count', 5))
+        difficulty = data.get('difficulty', 'medium')
+        math_symbols = data.get('math_symbols', 'english')
+        subject_name = data.get('subject_name', 'رياضيات').strip()
+        question_format = data.get('question_format', 'mcq')  # 'mcq', 'essay', or 'mixed'
+
+        # ملف مرفق (صورة أو PDF) يُقرأ في الذاكرة اللحظية فقط دون تخزين دائم
+        file_base64 = data.get('file_base64')
+        file_mime = data.get('file_mime')
+
+        # السماح بما يصل إلى 30 سؤالاً
+        count = max(1, min(count, 30))
+
+        context = f"المادة والمنهج: {subject_name}. الدرس / الموضوع: {topic or video_title}."
+        if video_description:
+            context += f" تفاصيل وملاحظات إضافية: {video_description}."
+
+        symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \\vec{v}, \\int, \\lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
+
+        if question_format == 'essay':
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة وذكية (حل بخطوات تفصيلية) مطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
+لكل سؤال مقالي، اكتب نص المسألة وخطوات الإجابة النموذجية بالتفصيل وتوزيع الدرجات.
+أجب بمصفوفة JSON الصافية التالية فقط:
+[
+  {{
+    "type": "essay",
+    "question": "نص المسألة المقالية متضمنا المعادلات الرياضية بين علامات $",
+    "model_answer": "خطوات الإجابة النموذجية مع القوانين والتعويض",
+    "rubric": "توزيع الدرجات (مثال: درجة للقانون والتعويض، درجتان للتبسيط، درجة للناتج النهائي)",
+    "points": 4,
+    "explanation": "شرح الفكرة الرياضية ومفاتيح الحل"
+  }}
+]"""
+        elif question_format == 'mixed':
+            mcq_count = max(1, count - 2) if count >= 4 else max(1, count - 1)
+            essay_count = count - mcq_count
+            format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً مطابقاً لمنهج ({subject_name}):
+- عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index (0 أو 1 أو 2 أو 3).
+- عدد {essay_count} سؤال مقالي رياضي يحتاج خطوات حل كاملة مع model_answer و rubric.
+مستوى الأسئلة: {difficulty}.
+أجب بمصفوفة JSON الصافية التالية فقط:
+[
+  {{
+    "type": "mcq",
+    "question": "نص السؤال متضمنا المعادلات بين $",
+    "options": ["أ", "ب", "ج", "د"],
+    "correct_option_index": 0,
+    "points": 2,
+    "explanation": "شرح الحل"
+  }},
+  {{
+    "type": "essay",
+    "question": "نص المسألة المقالية",
+    "model_answer": "خطوات الحل النموذجية",
+    "rubric": "توزيع الدرجات",
+    "points": 4,
+    "explanation": "شرح خطوات الحل"
+  }}
+]"""
+        else:
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
+كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة.
+أجب بمصفوفة JSON الصافية التالية فقط:
+[
+  {{
+    "type": "mcq",
+    "question": "نص السؤال الرياضي متضمنا المعادلات بين $",
+    "options": ["اختيار أ", "اختيار ب", "اختيار ج", "اختيار د"],
+    "correct_option_index": 0,
+    "points": 2,
+    "explanation": "خطوات الحل التفصيلية مع المعادلات بين $"
+  }}
+]"""
+
+        file_notice = ""
+        content_items = []
+        if file_base64 and file_mime:
+            try:
+                import base64
+                raw_bytes = base64.b64decode(file_base64)
+                content_items.append({
+                    'mime_type': file_mime,
+                    'data': raw_bytes
+                })
+                file_notice = f"""
+=========================
+تنبيه ملزم وحاسم جداً بخصوص الملف المرفق:
+مرفق مع هذا الطلب مستند أو ورقة تدريبات (PDF أو صورة) خاصة بالدرس والمنهج ({subject_name}).
+يجب عليك الالتزام التام والكامل بالقواعد التالية:
+1. استخرج الأسئلة والمسائل والتمارين مباشرة ومن قلب الملف المرفق.
+2. انقل نصوص المسائل والتمارين الحقيقية الموجودة في الملف بأرقامها ومعادلاتها ودوالها دون تأليف مسائل عامة من خارج المنهج.
+3. إذا كان المطلوب اختيار من متعدد (MCQ)، انقل المسألة من الملف، واصنع لها 4 خيارات حسابية واقعية مع تحديد الاختيار الصحيح بدقة وشرح الحل.
+4. إذا كان المطلوب مقالي (Essay)، انقل المسألة بنصها من الملف وضع خطوات الحل النموذجية المفصلة وتوزيع الدرجات.
+5. التزم التزاماً صارماً بتوليد العدد المطلوب كاملاً دون نقصان ({count} سؤالاً) مستخرجاً من مختلف صفحات وتمارين الملف.
+=========================
+"""
+            except Exception as fe:
+                print(f"Error decoding attached file: {fe}")
+
+        prompt = f"""أنت معلم وموجه خبير لمادة {subject_name} بأسلوب تعليمي رصين ودقيق.
+بيانات الدرس: {context} {file_notice}
+
+قواعد المعادلات والرموز:
+- {symbols_rule}
+- ضع أي معادلة أو تعبير رياضي بين علامتي دولار بصيغة LaTeX واضحة ونظيفة، مثل: $f(x) = \\sqrt{{x^2 + 1}}$
+
+{format_instructions}
+تذكر: أجب بمصفوفة JSON فقط بدون أي مقدمات أو كلام خارج الـ JSON."""
+
+        content_items.append(prompt)
+
+        model = get_gemini_model()
+        response = model.generate_content(content_items if len(content_items) > 1 else prompt)
+        res_text = response.text.strip()
+
+        if res_text.startswith('```json'):
+            res_text = res_text[7:]
+        elif res_text.startswith('```'):
+            res_text = res_text[3:]
+        if res_text.endswith('```'):
+            res_text = res_text[:-3]
+        res_text = res_text.strip()
+
+        # استخراج وتنظيف الـ JSON لمعادلات LaTeX ورموز الهروب \
+        json_str = res_text
+        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
+        if json_match:
+            json_str = json_match.group()
+
+        questions = None
+        # 1. محاولة القراءة المباشرة
+        try:
+            questions = json.loads(json_str, strict=False)
+        except Exception:
+            pass
+
+        # 2. معالجة شرطات الـ LaTeX المائلة غير المهربة
+        if questions is None:
+            try:
+                # استبدال الـ backslash غير المتبوع بـ " بـ \\
+                sanitized = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)
+                questions = json.loads(sanitized, strict=False)
+            except Exception:
+                pass
+
+        if questions is None:
+            try:
+                # استبدال كل \ ليس بعدها "
+                sanitized2 = re.sub(r'\\(?!")', r'\\\\', json_str)
+                questions = json.loads(sanitized2, strict=False)
+            except Exception:
+                pass
+
+        # 3. إذا تعذر كل ما سبق، القراءة بـ json.loads لإظهار الخطأ الدقيق
+        if questions is None:
+            questions = json.loads(json_str)
+
+        # التأكد من ملء الحقول الافتراضية
+        for q in questions:
+            if 'type' not in q:
+                q['type'] = 'essay' if ('options' not in q or not q['options']) else 'mcq'
+            if q['type'] == 'mcq' and ('options' not in q or not isinstance(q['options'], list)):
+                q['options'] = ["أ", "ب", "ج", "د"]
+
+        return jsonify({
+            'success': True,
+            'count': len(questions),
+            'questions': questions
+        })
+    except Exception as e:
+        print(f"AI Quiz Error: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'فشل توليد الأسئلة: {str(e)}'
+        }), 500
+
+
+# ============ AI Math Homework Hint Assistant ============
+
+@exams_bp.route('/api/ai/math-hint', methods=['POST'])
+@token_required
+def get_math_homework_hint():
+    """
+    مساعد حل مسائل الرياضيات والواجبات بالذكاء الاصطناعي
+    يقدم تلميحة ذكية ومفتاح الحل والخطوة الأولى دون إعطاء الناتج النهائي
+    """
+    try:
+        data = request.get_json() or {}
+        problem_text = data.get('problem', '').strip()
+        subject_name = data.get('subject', 'الرياضيات للثانوية العامة')
+
+        if not problem_text:
+            return jsonify({'success': False, 'error': 'يرجى كتابة نص المسألة'}), 400
+
+        prompt = f"""أنت معلم وموجه خبير للرياضيات للثانوية العامة المصرية بأسلوب أ. وليد الجارحي.
+الطالب يحاول حل هذه المسألة ويطلب مساعدة وتوجيهاً:
+المسألة:
+"{problem_text}"
+
+القواعد التربوية الإلزامية:
+1. ممنوع منعاً باتاً إعطاء الناتج النهائي أو الحل الكامل حتى لا يعتمد الطالب على الغش.
+2. حدد الفكرة الرياضية الأساسية للمسألة والقانون أو النظرية المستخدمة.
+3. وجّه الطالب إلى "الخطوة الأولى" للبدء بالحل (Socratic Hint).
+4. اكتب أي معادلة أو صيغة رياضية بدقة تامة بصيغة LaTeX محاطة بعلامتي دولار $ مثل: $f'(x) = 2x$.
+5. اجعل الشرح مختصراً وذكياً وفي نقاط واضحة بلهجة تشجيعية دافئة.
+
+أجب باللغة العربية مباشرة وبدون أي مقدمات طويلة."""
+
+        model = get_gemini_model()
+        response = model.generate_content(prompt)
+        hint_text = response.text.strip()
+
+        return jsonify({
+            'success': True,
+            'hint': hint_text
+        })
+    except Exception as e:
+        print(f"Math Hint Error: {e}")
+        return jsonify({'success': False, 'error': f'تعذر توليد التلميحة: {str(e)}'}), 500

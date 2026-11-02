@@ -25,10 +25,11 @@ import google.generativeai as genai
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    print("✅ Gemini AI initialized")
+    # استخدام REST transport لضمان السرعة وتجنب تعليق gRPC
+    genai.configure(api_key=GEMINI_API_KEY, transport='rest')
+    pass
 else:
-    print("⚠️ Gemini API key not found")
+    pass
 
 
 # ============ Helpers للاستخدام السريع ============
@@ -39,5 +40,8 @@ def get_supabase() -> Client:
 
 
 def get_gemini_model():
-    """يرجّع Gemini model"""
-    return genai.GenerativeModel('gemini-3.8-flash')
+    """يرجّع Gemini model السريع والمستقر مع بدائل"""
+    try:
+        return genai.GenerativeModel('gemini-3.5-flash')
+    except Exception:
+        return genai.GenerativeModel('gemini-3.8-flash')
