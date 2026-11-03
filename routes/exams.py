@@ -87,8 +87,13 @@ def _enrich_exams_with_groups(exams):
 @token_required
 def get_exams():
     try:
+        exam_type = request.args.get('exam_type') or request.args.get('type')
         query = supabase.table('exams').select('*').order('created_at', desc=True)
         query = apply_tenant_filter(query)
+        if exam_type == 'homework':
+            query = query.eq('exam_type', 'homework')
+        elif exam_type == 'exam':
+            query = query.neq('exam_type', 'homework')
         response = query.execute()
         exams = response.data or []
 
@@ -157,12 +162,17 @@ def create_exam():
         # إشعار تلقائي للطلاب
         try:
             if data.get('is_published', True):
+                is_hw = data.get('exam_type') == 'homework'
+                n_type = 'homework' if is_hw else 'exam'
+                n_title = f'واجب جديد: {title}' if is_hw else f'امتحان جديد: {title}'
+                n_msg = f'تم نشر واجب منزلي جديد بعنوان "{title}"، يمكنك الحل والتسليم بأريحية.' if is_hw else f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!'
+                n_icon = '📚' if is_hw else '📝'
                 supabase.table('honor_notifications').insert({
                     'tenant_id': tenant_id,
-                    'type': 'exam',
-                    'title': f'امتحان جديد: {title}',
-                    'message': f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!',
-                    'icon': '📝',
+                    'type': n_type,
+                    'title': n_title,
+                    'message': n_msg,
+                    'icon': n_icon,
                     'is_read': False
                 }).execute()
         except Exception as _ne:
@@ -377,9 +387,14 @@ def get_student_exams():
         if primary_group_id and primary_group_id not in student_group_ids:
             student_group_ids.append(primary_group_id)
 
+        exam_type = request.args.get('exam_type') or request.args.get('type')
         query = supabase.table('exams').select('*').eq('is_published', True)
         if student_tenant:
             query = query.eq('tenant_id', student_tenant)
+        if exam_type == 'homework':
+            query = query.eq('exam_type', 'homework')
+        elif exam_type == 'exam':
+            query = query.neq('exam_type', 'homework')
 
         if student_group_ids:
             query = query.or_(f"group_id.is.null,group_id.in.({','.join(map(str, student_group_ids))})")
@@ -398,7 +413,12 @@ def get_student_exams():
         existing_ids = {e['id'] for e in exams}
         remaining_ids = [eid for eid in eg_exam_ids if eid not in existing_ids]
         if remaining_ids:
-            extra_res = supabase.table('exams').select('*').in_('id', remaining_ids).eq('is_published', True).execute()
+            extra_q = supabase.table('exams').select('*').in_('id', remaining_ids).eq('is_published', True)
+            if exam_type == 'homework':
+                extra_q = extra_q.eq('exam_type', 'homework')
+            elif exam_type == 'exam':
+                extra_q = extra_q.neq('exam_type', 'homework')
+            extra_res = extra_q.execute()
             exams += (extra_res.data or [])
 
         submissions_res = supabase.table('student_exams')\
@@ -1029,40 +1049,59 @@ def generate_ai_quiz():
 
         symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \\vec{v}, \\int, \\lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
 
+        diagram_guidelines = """
+قواعد الرسومات التوضيحية والهندسية (SVG Diagrams):
+- إذا كان السؤال يتطلب رسماً توضيحياً (مثل: أشكال هندسية 2D أو 3D بأضلاع وزوايا، محاور إحداثية ودوال بيانية، مخططات قوى وحركة لسطح مائل أو بكرات، دوائر كهربائية، رسوم بيانية للطاقة والقدرة والكفاءة والزمن):
+  * قم بإنشاء كود SVG متكامل ونظيف ومتجاوب تماماً داخل حقل "diagram_svg".
+  * مواصفات الـ SVG: أبعاد مناسبة مثل viewBox='0 0 360 220'، نصوص وأرقام واضحة، خطوط ملونة حديثة وأسهم دقيقة.
+  * لا تستخدم أي وسوم script أو أحداث داخل الـ SVG.
+- إذا لم يتطلب السؤال أي رسم أو كان جبرياً/نظرياً بحتاً، اجعل قيمة "diagram_svg": null.
+
+معايير الدقة الرياضية والفيزيائية الصارمة:
+1. الدقة الحسابية التامة: احسب كل ناتج ومعادلة وتعويض رقمي خطوة بخطوة وتأكد 100% أن correct_option_index يطابق الناتج الصحيح علمياً بلا أي خطأ.
+2. منطقية المموهات (Distractors): اجعل الخيارات الخاطئة مبنية على أخطاء مفاهيمية أو إشارية شائعة لدى الطلاب، وتجنب الأرقام العشوائية.
+3. التفصيل في explanation: اكتب خطوات الحل والقوانين الرياضية/الفيزيائية بوضوح مع وضع الرموز بين علامات $.
+"""
+
         if question_format == 'essay':
-            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة وذكية (حل بخطوات تفصيلية) مطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
-لكل سؤال مقالي، اكتب نص المسألة وخطوات الإجابة النموذجية بالتفصيل وتوزيع الدرجات.
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة ومحكمة مطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
+لكل سؤال مقالي، اكتب نص المسألة، وأرفق كود SVG إذا كان السؤال يحتاج رسماً أو شكلاً، وخطوات الإجابة النموذجية وتوزيع الدرجات.
+{diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
   {{
     "type": "essay",
-    "question": "نص المسألة المقالية متضمنا المعادلات الرياضية بين علامات $",
+    "question": "نص المسألة المقالية متضمنا المعادلات بين $",
+    "diagram_svg": "<svg viewBox='0 0 360 220' xmlns='http://www.w3.org/2000/svg'>...</svg> (أو null إذا لم يتطلب رسماً)",
     "model_answer": "خطوات الإجابة النموذجية مع القوانين والتعويض",
     "rubric": "توزيع الدرجات (مثال: درجة للقانون والتعويض، درجتان للتبسيط، درجة للناتج النهائي)",
     "points": 4,
-    "explanation": "شرح الفكرة الرياضية ومفاتيح الحل"
+    "explanation": "شرح الفكرة والمفاهيم الأساسية"
   }}
 ]"""
         elif question_format == 'mixed':
             mcq_count = max(1, count - 2) if count >= 4 else max(1, count - 1)
             essay_count = count - mcq_count
             format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً مطابقاً لمنهج ({subject_name}):
-- عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index (0 أو 1 أو 2 أو 3).
-- عدد {essay_count} سؤال مقالي رياضي يحتاج خطوات حل كاملة مع model_answer و rubric.
+- عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index ورسم SVG عند الحاجة.
+- عدد {essay_count} سؤال مقالي يحتاج خطوات حل كاملة مع model_answer و rubric ورسم SVG عند الحاجة.
 مستوى الأسئلة: {difficulty}.
+{diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
   {{
     "type": "mcq",
     "question": "نص السؤال متضمنا المعادلات بين $",
+    "diagram_svg": "<svg viewBox='0 0 360 220' xmlns='http://www.w3.org/2000/svg'>...</svg> (أو null إذا لم يتطلب رسماً)",
     "options": ["أ", "ب", "ج", "د"],
     "correct_option_index": 0,
     "points": 2,
-    "explanation": "شرح الحل"
+    "explanation": "خطوات الحل"
   }},
   {{
     "type": "essay",
     "question": "نص المسألة المقالية",
+    "diagram_svg": null,
     "model_answer": "خطوات الحل النموذجية",
     "rubric": "توزيع الدرجات",
     "points": 4,
@@ -1071,12 +1110,14 @@ def generate_ai_quiz():
 ]"""
         else:
             format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
-كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة.
+كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة ورسم توضيحي SVG إذا كان السؤال هندسياً أو فيزيائياً أو بيانياً.
+{diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
   {{
     "type": "mcq",
-    "question": "نص السؤال الرياضي متضمنا المعادلات بين $",
+    "question": "نص السؤال الرياضي أو الفيزيائي متضمنا المعادلات بين $",
+    "diagram_svg": "<svg viewBox='0 0 360 220' xmlns='http://www.w3.org/2000/svg'>...</svg> (أو null إذا لم يتطلب رسماً)",
     "options": ["اختيار أ", "اختيار ب", "اختيار ج", "اختيار د"],
     "correct_option_index": 0,
     "points": 2,
@@ -1179,12 +1220,23 @@ def generate_ai_quiz():
         if questions is None:
             questions = json.loads(json_str)
 
-        # التأكد من ملء الحقول الافتراضية
+        import urllib.parse
+        # التأكد من ملء الحقول الافتراضية ومعالجة رسومات الـ SVG
         for q in questions:
             if 'type' not in q:
                 q['type'] = 'essay' if ('options' not in q or not q['options']) else 'mcq'
             if q['type'] == 'mcq' and ('options' not in q or not isinstance(q['options'], list)):
                 q['options'] = ["أ", "ب", "ج", "د"]
+            
+            # تجهيز رسم الـ SVG وحفظه كـ data URI ليعمل في كافة أجزاء المنصة بسلاسة
+            diagram_svg = q.get('diagram_svg')
+            if diagram_svg and isinstance(diagram_svg, str) and '<svg' in diagram_svg:
+                clean_svg = diagram_svg.strip()
+                if 'xmlns=' not in clean_svg:
+                    clean_svg = clean_svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"')
+                q['diagram_svg'] = clean_svg
+                if not q.get('question_image_url'):
+                    q['question_image_url'] = f"data:image/svg+xml;utf8,{urllib.parse.quote(clean_svg)}"
 
         return jsonify({
             'success': True,
