@@ -87,8 +87,13 @@ def _enrich_exams_with_groups(exams):
 @token_required
 def get_exams():
     try:
+        exam_type = request.args.get('exam_type') or request.args.get('type')
         query = supabase.table('exams').select('*').order('created_at', desc=True)
         query = apply_tenant_filter(query)
+        if exam_type == 'homework':
+            query = query.eq('exam_type', 'homework')
+        elif exam_type == 'exam':
+            query = query.neq('exam_type', 'homework')
         response = query.execute()
         exams = response.data or []
 
@@ -157,12 +162,17 @@ def create_exam():
         # إشعار تلقائي للطلاب
         try:
             if data.get('is_published', True):
+                is_hw = data.get('exam_type') == 'homework'
+                n_type = 'homework' if is_hw else 'exam'
+                n_title = f'واجب جديد: {title}' if is_hw else f'امتحان جديد: {title}'
+                n_msg = f'تم نشر واجب منزلي جديد بعنوان "{title}"، يمكنك الحل والتسليم بأريحية.' if is_hw else f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!'
+                n_icon = '📚' if is_hw else '📝'
                 supabase.table('honor_notifications').insert({
                     'tenant_id': tenant_id,
-                    'type': 'exam',
-                    'title': f'امتحان جديد: {title}',
-                    'message': f'تم نشر اختبار جديد بعنوان "{title}"، ابدأ بحل الاختبار الآن وتحدّ نفسك!',
-                    'icon': '📝',
+                    'type': n_type,
+                    'title': n_title,
+                    'message': n_msg,
+                    'icon': n_icon,
                     'is_read': False
                 }).execute()
         except Exception as _ne:
@@ -377,9 +387,14 @@ def get_student_exams():
         if primary_group_id and primary_group_id not in student_group_ids:
             student_group_ids.append(primary_group_id)
 
+        exam_type = request.args.get('exam_type') or request.args.get('type')
         query = supabase.table('exams').select('*').eq('is_published', True)
         if student_tenant:
             query = query.eq('tenant_id', student_tenant)
+        if exam_type == 'homework':
+            query = query.eq('exam_type', 'homework')
+        elif exam_type == 'exam':
+            query = query.neq('exam_type', 'homework')
 
         if student_group_ids:
             query = query.or_(f"group_id.is.null,group_id.in.({','.join(map(str, student_group_ids))})")
@@ -398,7 +413,12 @@ def get_student_exams():
         existing_ids = {e['id'] for e in exams}
         remaining_ids = [eid for eid in eg_exam_ids if eid not in existing_ids]
         if remaining_ids:
-            extra_res = supabase.table('exams').select('*').in_('id', remaining_ids).eq('is_published', True).execute()
+            extra_q = supabase.table('exams').select('*').in_('id', remaining_ids).eq('is_published', True)
+            if exam_type == 'homework':
+                extra_q = extra_q.eq('exam_type', 'homework')
+            elif exam_type == 'exam':
+                extra_q = extra_q.neq('exam_type', 'homework')
+            extra_res = extra_q.execute()
             exams += (extra_res.data or [])
 
         submissions_res = supabase.table('student_exams')\
