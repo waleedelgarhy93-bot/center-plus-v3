@@ -1040,6 +1040,30 @@ def generate_ai_quiz():
         file_base64 = data.get('file_base64')
         file_mime = data.get('file_mime')
 
+        # دعم جدول مواصفات مستويات الصعوبة المتوازنة
+        diff_dist = data.get('difficulty_distribution')
+        dist_instruction = ""
+        if diff_dist and isinstance(diff_dist, dict):
+            easy_c = max(0, int(diff_dist.get('easy', 0)))
+            med_c = max(0, int(diff_dist.get('medium', 0)))
+            hard_c = max(0, int(diff_dist.get('hard', 0)))
+            exp_c = max(0, int(diff_dist.get('expert', 0)))
+            total_dist = easy_c + med_c + hard_c + exp_c
+            if total_dist > 0:
+                count = max(1, min(total_dist, 30))
+                dist_instruction = f"""
+جدول مواصفات مستويات الصعوبة الإلزامي:
+يجب أن يحتوي الاختبار على إجمالي {count} سؤالاً موزعة حرفياً كالتالي:
+- عدد {easy_c} أسئلة بمستوى "سهل ومباشر" (easy): تذكر القوانين وتطبيق مباشر فوري.
+- عدد {med_c} أسئلة بمستوى "متوسط" (medium): تطبيق وفهم يحتاج خطوة أو خطوتين.
+- عدد {hard_c} أسئلة بمستوى "صعب وغير نمطي" (hard): مسائل مركبة وربط أكثر من فكرة وحل مشكلات.
+- عدد {exp_c} أسئلة بمستوى "مهارات تفكير عليا" (expert): مسائل إبداعية وتفكير ناقد وتمايز للمتفوقين.
+
+إلزام صارم: يجب أن يحتوي كل كائن سؤال في JSON على حقل "difficulty" بالقيمة المطابقة له بدقة ("easy" | "medium" | "hard" | "expert").
+"""
+        if not dist_instruction:
+            dist_instruction = f"مستوى الأسئلة المطلوب: {difficulty}."
+
         # السماح بما يصل إلى 30 سؤالاً
         count = max(1, min(count, 30))
 
@@ -1064,7 +1088,8 @@ def generate_ai_quiz():
 """
 
         if question_format == 'essay':
-            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة ومحكمة مطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة مقالية دقيقة ومحكمة مطابقة لمنهج ({subject_name}).
+{dist_instruction}
 لكل سؤال مقالي، اكتب نص المسألة، وأرفق كود SVG إذا كان السؤال يحتاج رسماً أو شكلاً، وخطوات الإجابة النموذجية وتوزيع الدرجات.
 {diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
@@ -1085,7 +1110,7 @@ def generate_ai_quiz():
             format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً مطابقاً لمنهج ({subject_name}):
 - عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index ورسم SVG عند الحاجة.
 - عدد {essay_count} سؤال مقالي يحتاج خطوات حل كاملة مع model_answer و rubric ورسم SVG عند الحاجة.
-مستوى الأسئلة: {difficulty}.
+{dist_instruction}
 {diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
 [
@@ -1109,7 +1134,8 @@ def generate_ai_quiz():
   }}
 ]"""
         else:
-            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمنهج ({subject_name}) ومستوى {difficulty}.
+            format_instructions = f"""المطلوب: ولّد {count} أسئلة اختيار من متعدد (MCQ) دقيقة وذكية ومطابقة لمنهج ({subject_name}).
+{dist_instruction}
 كل سؤال يحتوي على 4 اختيارات بالضبط مع تحديد الإجابة الصحيحة ورسم توضيحي SVG إذا كان السؤال هندسياً أو فيزيائياً أو بيانياً.
 {diagram_guidelines}
 أجب بمصفوفة JSON الصافية التالية فقط:
@@ -1227,6 +1253,9 @@ def generate_ai_quiz():
                 q['type'] = 'essay' if ('options' not in q or not q['options']) else 'mcq'
             if q['type'] == 'mcq' and ('options' not in q or not isinstance(q['options'], list)):
                 q['options'] = ["أ", "ب", "ج", "د"]
+            
+            # تثبيت مستوى الصعوبة الدقيق لكل سؤال
+            q['difficulty'] = q.get('difficulty') or difficulty
             
             # تجهيز رسم الـ SVG وحفظه كـ data URI ليعمل في كافة أجزاء المنصة بسلاسة
             diagram_svg = q.get('diagram_svg')
