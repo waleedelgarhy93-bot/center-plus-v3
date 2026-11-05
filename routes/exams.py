@@ -193,6 +193,12 @@ def get_exam(exam_id):
         if not check_tenant_ownership(exam_res.data[0]):
             return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
+        exam_data = exam_res.data[0]
+        group_ids = _get_exam_group_ids(exam_id)
+        if not group_ids and exam_data.get('group_id'):
+            group_ids = [exam_data['group_id']]
+        exam_data['group_ids'] = group_ids
+
         questions_res = supabase.table('questions')\
             .select('*')\
             .eq('exam_id', exam_id)\
@@ -201,7 +207,7 @@ def get_exam(exam_id):
 
         return jsonify({
             'success': True,
-            'exam': exam_res.data[0],
+            'exam': exam_data,
             'questions': questions_res.data or []
         })
     except Exception as e:

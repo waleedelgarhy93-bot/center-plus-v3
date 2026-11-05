@@ -195,8 +195,58 @@ def get_document(doc_id):
             if sub_res.data:
                 doc['subject_name'] = sub_res.data[0]['name']
 
+        doc['group_ids'] = _get_document_group_ids(doc_id)
         _parse_doc_download_flag(doc)
         return jsonify({'success': True, 'document': doc})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@documents_bp.route('/api/documents/<int:doc_id>', methods=['PUT'])
+@token_required
+def update_document(doc_id):
+    try:
+        existing = supabase.table('documents').select('*').eq('id', doc_id).execute()
+        if not existing.data:
+            return jsonify({'success': False, 'error': 'المذكرة غير موجودة'}), 404
+        if not check_tenant_ownership(existing.data[0]):
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
+
+        data = request.get_json() or {}
+        update_data = {}
+        for field in ['title', 'subject_id', 'category_id']:
+            if field in data:
+                update_data[field] = data[field]
+
+        # Handle allow_download in description
+        if 'allow_download' in data or 'description' in data:
+            current_desc = existing.data[0].get('description') or ''
+            clean_desc = current_desc.replace('[ALLOW_DOWNLOAD]', '').strip()
+            if 'description' in data:
+                clean_desc = (data.get('description') or '').replace('[ALLOW_DOWNLOAD]', '').strip()
+            allow_dl = data.get('allow_download', '[ALLOW_DOWNLOAD]' in current_desc)
+            update_data['description'] = f"{clean_desc} [ALLOW_DOWNLOAD]".strip() if allow_dl else clean_desc
+
+        group_ids = data.get('group_ids')
+        if group_ids is None and 'group_id' in data:
+            group_ids = [data['group_id']] if data['group_id'] else []
+
+        tenant_id = existing.data[0].get('tenant_id')
+        if group_ids is not None:
+            update_data['group_id'] = group_ids[0] if group_ids else None
+            _save_document_groups(doc_id, group_ids, tenant_id)
+
+        if update_data:
+            result = supabase.table('documents').update(update_data).eq('id', doc_id).execute()
+            doc = result.data[0] if result.data else None
+        else:
+            doc = existing.data[0]
+
+        if doc:
+            doc['group_ids'] = _get_document_group_ids(doc_id)
+            _parse_doc_download_flag(doc)
+
+        return jsonify({'success': True, 'message': 'تم تعديل المذكرة بنجاح', 'document': doc})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
