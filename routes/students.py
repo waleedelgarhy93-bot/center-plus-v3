@@ -538,3 +538,69 @@ def get_students_activity_tracker():
     except Exception as e:
         print(f"Activity Tracker Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============ Student: My Enrolled Subjects ============
+
+@students_bp.route('/api/student/my-subjects', methods=['GET'])
+@token_required
+def get_student_my_subjects():
+    """جلب المواد والمجموعات التي اشترك فيها الطالب فقط"""
+    try:
+        student_res = supabase.table('students').select('*').eq('id', request.user_id).execute()
+        if not student_res.data:
+            return jsonify({'success': False, 'error': 'الطالب غير موجود'}), 404
+
+        student = student_res.data[0]
+        primary_group_id = student.get('group_id')
+
+        # جلب المجموعات الإضافية من student_groups
+        sg_res = supabase.table('student_groups').select('group_id').eq('student_id', request.user_id).execute()
+        group_ids = [r['group_id'] for r in (sg_res.data or []) if r.get('group_id')]
+        if primary_group_id and primary_group_id not in group_ids:
+            group_ids.append(primary_group_id)
+
+        if not group_ids:
+            return jsonify({'success': True, 'subjects': [], 'student': student})
+
+        # جلب تفاصيل المجموعات
+        groups_res = supabase.table('groups').select('id, grade, center, subject_id, days, time').in_('id', group_ids).execute()
+        groups = groups_res.data or []
+
+        # جلب المواد
+        subject_ids = list({g['subject_id'] for g in groups if g.get('subject_id')})
+        subjects_map = {}
+        if subject_ids:
+            subs_res = supabase.table('subjects').select('id, name, description, color, icon').in_('id', subject_ids).execute()
+            subjects_map = {s['id']: s for s in (subs_res.data or [])}
+
+        student_subjects = []
+        for g in groups:
+            sid = g.get('subject_id')
+            if not sid:
+                continue
+            sub_info = subjects_map.get(sid, {})
+            student_subjects.append({
+                'subject_id': sid,
+                'subject_name': sub_info.get('name', 'مادة دراسية'),
+                'subject_color': sub_info.get('color', 'blue'),
+                'subject_icon': sub_info.get('icon'),
+                'grade': g.get('grade', ''),
+                'center': g.get('center', ''),
+                'group_id': g['id'],
+                'days': g.get('days', ''),
+                'time': g.get('time', ''),
+            })
+
+        return jsonify({
+            'success': True,
+            'student': {
+                'id': student['id'],
+                'name': student['name'],
+                'barcode': student.get('barcode'),
+                'grade': student_subjects[0]['grade'] if student_subjects else '',
+            },
+            'subjects': student_subjects
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
