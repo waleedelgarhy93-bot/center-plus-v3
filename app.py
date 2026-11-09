@@ -58,6 +58,8 @@ from routes.devices import devices_bp
 from routes.documents import documents_bp
 from routes.categories import categories_bp
 from routes.question_bank import question_bank_bp
+from routes.branches import branches_bp
+
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(students_bp)
@@ -77,6 +79,7 @@ app.register_blueprint(devices_bp)
 app.register_blueprint(documents_bp)
 app.register_blueprint(categories_bp)
 app.register_blueprint(question_bank_bp)
+app.register_blueprint(branches_bp)
 from routes.live import live_bp
 app.register_blueprint(live_bp)
 
