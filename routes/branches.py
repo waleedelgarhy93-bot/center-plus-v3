@@ -1,4 +1,4 @@
-# routes/branches.py - إدارة الفروع والوحدات الدراسية (Grade → Subject → Branch)
+﻿# routes/branches.py - إدارة الفروع والوحدات الدراسية (Grade → Subject → Branch)
 from flask import Blueprint, jsonify, request
 from db import supabase
 from helpers import (
@@ -245,11 +245,11 @@ def get_branch_content(branch_id):
 
         # جلب المحتوى بالتوازي
         videos_res = supabase.table('videos').select('id, title, description, video_url, created_at').eq('branch_id', branch_id).execute()
-        exams_res = supabase.table('exams').select('id, title, description, created_at, max_grade').eq('branch_id', branch_id).execute()
+        exams_res = supabase.table('exams').select('id, title, description, created_at, max_grade').eq('branch_id', branch_id).neq('exam_type', 'homework').execute()
 
-        # Homework
+        # Homework (stored in exams with exam_type = 'homework')
         try:
-            hw_res = supabase.table('homework').select('id, title, description, created_at, due_date').eq('branch_id', branch_id).execute()
+            hw_res = supabase.table('exams').select('id, title, description, created_at, max_grade').eq('branch_id', branch_id).eq('exam_type', 'homework').execute()
             homework = hw_res.data or []
         except Exception:
             homework = []
@@ -279,3 +279,4 @@ def get_branch_content(branch_id):
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
