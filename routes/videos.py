@@ -182,6 +182,7 @@ def create_video():
             'video_url': video_url,
             'subject_id': data.get('subject_id'),
             'category_id': int(data['category_id']) if data.get('category_id') else None,
+            'branch_id': int(data['branch_id']) if data.get('branch_id') else None,
             'group_id': group_ids[0] if group_ids else None,
             'teacher_id': request.user_id,
             'max_views': data.get('max_views', 0),
@@ -229,9 +230,9 @@ def update_video(video_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'video_url', 'subject_id', 'category_id', 'max_views', 'access_type', 'access_code', 'price', 'linked_exam_id', 'require_exam']:
+        for field in ['title', 'description', 'video_url', 'subject_id', 'category_id', 'branch_id', 'max_views', 'access_type', 'access_code', 'price', 'linked_exam_id', 'require_exam']:
             if field in data:
-                if field == 'category_id':
+                if field in ('category_id', 'branch_id'):
                     update_data[field] = int(data[field]) if data[field] else None
                 elif field == 'linked_exam_id':
                     update_data[field] = int(data[field]) if data[field] else None

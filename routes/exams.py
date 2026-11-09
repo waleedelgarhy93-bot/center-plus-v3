@@ -144,6 +144,7 @@ def create_exam():
             'group_id': group_ids[0] if group_ids else None,
             'subject_id': data.get('subject_id'),
             'category_id': int(data['category_id']) if data.get('category_id') else None,
+            'branch_id': int(data['branch_id']) if data.get('branch_id') else None,
             'teacher_id': request.user_id,
             'max_grade': data.get('max_grade', 100),
             'duration_minutes': data.get('duration_minutes', 0),
@@ -229,7 +230,7 @@ def update_exam(exam_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'description', 'subject_id', 'category_id', 'max_grade',
+        for field in ['title', 'description', 'subject_id', 'category_id', 'branch_id', 'max_grade',
                       'duration_minutes', 'show_result', 'has_essay', 'essay_prompt',
                       'essay_max_grade', 'is_published', 'exam_type', 'external_link']:
             if field in data:
