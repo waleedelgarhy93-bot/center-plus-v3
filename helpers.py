@@ -1,4 +1,4 @@
-# helpers.py - كل الـ helpers + JWT + Multi-tenancy
+﻿# helpers.py - كل الـ helpers + JWT + Multi-tenancy
 import os
 import bcrypt
 import jwt

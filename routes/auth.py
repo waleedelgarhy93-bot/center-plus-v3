@@ -1,4 +1,4 @@
-# routes/auth.py - كل الـ auth endpoints + Single Device Login
+﻿# routes/auth.py - كل الـ auth endpoints + Single Device Login
 from flask import Blueprint, jsonify, request
 import random
 import string
@@ -609,3 +609,4 @@ def teacher_settings():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
