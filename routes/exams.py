@@ -115,6 +115,9 @@ def get_exams():
                 e['group_name'] = groups_map.get(e.get('group_id'))
                 e['subject_name'] = subjects_map.get(e.get('subject_id'))
 
+            exams = _enrich_exams_with_groups(exams)
+            exams = _enrich_categories(exams)
+
         return jsonify({'success': True, 'count': len(exams), 'exams': exams})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
