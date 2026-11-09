@@ -1030,6 +1030,45 @@ def _recalculate_submission_grade(submission_id):
 
 # ============ AI Quiz Generation Endpoint ============
 
+
+def _enforce_arabic_symbols(questions):
+    """تحويل أي رموز إنجليزية شاردة تسربت من الذكاء الاصطناعي إلى الرموز العربية المقابلة"""
+    replacements = [
+        (r'\\sin\b', r'\\text{جا}'),
+        (r'\\cos\b', r'\\text{جتا}'),
+        (r'\\tan\b', r'\\text{ظا}'),
+        (r'\\cot\b', r'\\text{ظتا}'),
+        (r'\\sec\b', r'\\text{قا}'),
+        (r'\\csc\b', r'\\text{قتا}'),
+        (r'\\ln\b', r'\\text{لو}_هـ'),
+        (r'\\log\b', r'\\text{لو}'),
+        (r'\\lim\b', r'\\text{نهـا}'),
+        (r'\\frac\{dy\}\{dx\}', r'\\frac{ء ص}{ء س}'),
+        (r'\bdy/dx\b', r'ء ص / ء س'),
+        (r'\bdx\b', r'ء س'),
+        (r'\bdy\b', r'ء ص'),
+        (r'\be\^', r'هـ^'),
+        (r'\be\_', r'هـ_'),
+    ]
+    def sanitize_str(s):
+        if not s or not isinstance(s, str):
+            return s
+        res = s
+        for pat, repl in replacements:
+            res = re.sub(pat, repl, res)
+        return res
+
+    for q in questions:
+        if 'question' in q:
+            q['question'] = sanitize_str(q['question'])
+        if 'options' in q and isinstance(q['options'], list):
+            q['options'] = [sanitize_str(opt) for opt in q['options']]
+        if 'explanation' in q:
+            q['explanation'] = sanitize_str(q['explanation'])
+        if 'model_answer' in q:
+            q['model_answer'] = sanitize_str(q['model_answer'])
+    return questions
+
 @exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
 @token_required
 def generate_ai_quiz():
@@ -1041,7 +1080,19 @@ def generate_ai_quiz():
         video_description = data.get('video_description', '').strip()
         count = int(data.get('count', 5))
         difficulty = data.get('difficulty', 'medium')
-        math_symbols = data.get('math_symbols', 'english')
+        math_symbols = data.get('math_symbols', '').strip()
+        grade_name = data.get('grade_name', '').strip()
+        # ذكاء التحديد التلقائي لنمط الرموز إن لم يكن محدداً يدوياً
+        if not math_symbols or math_symbols == 'auto':
+            is_physics = 'فيزياء' in subject_name.lower() or 'physics' in subject_name.lower()
+            is_prep = any(p in grade_name for p in ['إعدادي', 'اعدادي', 'ابتدائي', 'عاشر'])
+            is_sec = any(s in grade_name for s in ['ثانوي', 'بكالوريا']) or any(s in subject_name for s in ['ثانوي', 'بكالوريا'])
+            if is_physics or is_prep:
+                math_symbols = 'english'
+            elif is_sec:
+                math_symbols = 'arabic'
+            else:
+                math_symbols = 'arabic'
         subject_name = data.get('subject_name', 'رياضيات').strip()
         question_format = data.get('question_format', 'mcq')  # 'mcq', 'essay', or 'mixed'
 
@@ -1080,7 +1131,33 @@ def generate_ai_quiz():
         if video_description:
             context += f" تفاصيل وملاحظات إضافية: {video_description}."
 
-        symbols_rule = "استخدم الرموز الإنجليزية القياسية (x, y, f(x), \\vec{v}, \\int, \\lim) داخل المعادلات." if math_symbols == 'english' else "استخدم الرموز العربية التقليدية للرياضيات."
+        if math_symbols == 'arabic':
+            symbols_rule = """
+قواعد صارمة وإلزامية للرموز والأرقام بالعربية (منهج الرياضيات للثانوية العامة المصرية):
+1. حظر تام للرموز الإنجليزية: ممنوع منعاً باتاً استخدام الحروف والرموز الإنجليزية داخل الأسئلة أو المعادلات أو الخيارات أو الشرح (ممنوع نهائياً x, y, z, e, i, sin, cos, tan, log, ln, dx, k, m, n).
+2. جدول تحويل الرموز الإجباري (حتى لو كان الملف المرفق أو المسألة الأصلية مكتوبة برموز إنجليزية، حوّلها فوراً وبلا استثناء إلى العربية):
+   - المتغيرات: س بدلاً من x ، ص بدلاً من y ، ع بدلاً من z ، ن بدلاً من n ، ر بدلاً من r.
+   - المعاملات والثوابت: أ ، ب ، جـ ، ك بدلاً من k ، م بدلاً من m.
+   - العدد التخيلي (الأعداد المركبة): ت بدلاً من i (حيث ت² = -1).
+   - أساس اللوغاريتم الطبيعي: هـ بدلاً من e (مثال: هـ^س أو هـ^{٢س}).
+   - الدوال المثلثية: جا بدلاً من sin ، جتا بدلاً من cos ، ظا بدلاً من tan ، ظتا بدلاً من cot ، قا بدلاً من sec ، قتا بدلاً من csc.
+   - اللوغاريتمات: لو بدلاً من log ، لو_هـ بدلاً من ln.
+   - التفاضل والتكامل: (ء ص / ء س) أو د(س) أو ص' بدلاً من dy/dx ، ورمز التكامل: \int ... ء س بدلاً من dx.
+   - النهايات: \lim_{س \to أ} أو نهـا (س -> أ).
+   - رمز التجميع والمتسلسلات: \sum_{ر=1}^{ن}.
+   - المتجهات والمصفوفات: \vec{س} ، \vec{ص} أو الصورة الإحداثية (س ، ص).
+   - الأرقام: استخدم الأرقام العربية المشهورة في منهج الثانوية العامة (أو الأرقام المشرقية المتسقة مع صياغة السؤال).
+3. اتجاه وتنسيق المعادلات:
+   - نص المسألة والمعادلات منسق من اليمين إلى اليسار (RTL).
+   - ضع المعادلات بوضوح بين علامات $، واحرص على ألا تنعكس الإشارات أو الأقواس (مثال: $س + ص = ٥$ وليس $٥ = ص + س$).
+"""
+        else:
+            symbols_rule = """
+قواعد صارمة: الرموز والأرقام بالإنجليزية (Standard English Math / Physics):
+1. للمرحلة الإعدادية ومادة الفيزياء: استخدم الرموز والأرقام الإنجليزية القياسية (x, y, z, f(x), i, e, \sin, \cos, \tan, \ln, \lim, dx, 1, 2, 3, 4, 5).
+2. لمادة الفيزياء: استخدم رموز الكميات الفيزيائية الإنجليزية المعتمدة (v, a, t, F, E, P, m, r, I, V, R) مع الوحدات العالمية.
+3. ضع التعبيرات الرياضية بدقة داخل صيغة LaTeX واضحة بين علامات $ مثل $f(x) = x^2 + 2x - 5$.
+"""
 
         diagram_guidelines = """
 قواعد الرسومات التوضيحية والهندسية (SVG Diagrams):
@@ -1254,6 +1331,9 @@ def generate_ai_quiz():
         # 3. إذا تعذر كل ما سبق، القراءة بـ json.loads لإظهار الخطأ الدقيق
         if questions is None:
             questions = json.loads(json_str)
+
+        if math_symbols == 'arabic' and questions:
+            questions = _enforce_arabic_symbols(questions)
 
         import urllib.parse
         # التأكد من ملء الحقول الافتراضية ومعالجة رسومات الـ SVG
