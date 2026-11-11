@@ -18,6 +18,21 @@ auth_bp = Blueprint('auth', __name__)
 
 # ============ Helpers ============
 
+_BIDI_CHARS = ''.join([
+    '\u200b', '\u200c', '\u200d', '\u200e', '\u200f',
+    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+    '\u2066', '\u2067', '\u2068', '\u2069', '\ufeff'
+])
+_TRANS_TABLE = str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789', _BIDI_CHARS)
+
+
+def _normalize_credential(val):
+    """ينظف الحقول من المسافات والرموز الخفية ويحول الأرقام العربية/الهندية لإنجليزية"""
+    if not val or not isinstance(val, str):
+        return ''
+    return val.translate(_TRANS_TABLE).strip()
+
+
 def _get_device_limit(tenant_id, role):
     """يرجّع الحد الأقصى لعدد الأجهزة حسب دور المستخدم"""
     # المعلم والسوبر أدمن بدون حد أقصى نهائياً
@@ -166,14 +181,19 @@ def login():
         return '', 200
     try:
         data = request.get_json() or {}
-        username = data.get('username')
-        password = data.get('password')
+        raw_username = data.get('username')
+        raw_password = data.get('password')
         device_id = data.get('device_id', 'unknown')
+
+        username = _normalize_credential(raw_username)
+        password = _normalize_credential(raw_password)
 
         if not username or not password:
             return jsonify({'success': False, 'error': 'username و password مطلوبين'}), 400
 
         response = supabase.table('users').select('*').eq('username', username).execute()
+        if not response.data and username != username.lower():
+            response = supabase.table('users').select('*').eq('username', username.lower()).execute()
         if not response.data:
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
@@ -282,9 +302,9 @@ def login_student():
         return '', 200
     try:
         data = request.get_json() or {}
-        barcode = data.get('barcode')
-        username = data.get('username')
-        password = data.get('password')
+        barcode = _normalize_credential(data.get('barcode'))
+        username = _normalize_credential(data.get('username'))
+        password = _normalize_credential(data.get('password'))
         device_id = data.get('device_id', 'unknown')
 
         if not barcode or not username or not password:

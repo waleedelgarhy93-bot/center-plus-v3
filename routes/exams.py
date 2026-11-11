@@ -962,8 +962,26 @@ def _run_ai_grading(question_text, question_image_url, student_answer, student_a
     prompt = "\n".join(prompt_parts)
     contents = [prompt]
 
+    def _parse_img_urls(val):
+        if not val or not isinstance(val, str):
+            return []
+        s = val.strip()
+        if s.startswith('['):
+            try:
+                arr = json.loads(s)
+                if isinstance(arr, list):
+                    return [str(u).strip() for u in arr if u]
+            except Exception:
+                pass
+        return [s] if s else []
+
+    student_imgs = _parse_img_urls(student_answer_image_url)
+    if len(student_imgs) > 1:
+        contents[0] = contents[0] + "\n\nملاحظة: حل الطالب مرفوع على أكثر من صورة (" + str(len(student_imgs)) + " صفحات)، يرجى قراءة جميع الصور بالترتيب وتقييم الحل كاملاً."
+
     # إضافة الصور
-    for img_url in [question_image_url, student_answer_image_url, correct_answer_image_url]:
+    all_imgs = _parse_img_urls(question_image_url) + student_imgs + _parse_img_urls(correct_answer_image_url)
+    for img_url in all_imgs:
         if img_url:
             try:
                 with urllib.request.urlopen(img_url, timeout=10) as response:
