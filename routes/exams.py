@@ -1418,6 +1418,134 @@ def generate_ai_quiz():
         }), 500
 
 
+# ============ AI Extract Questions from File (PDF / Image) ============
+
+@exams_bp.route('/api/exams/extract-from-file', methods=['POST'])
+@token_required
+def extract_questions_from_file():
+    """
+    يستقبل ملف PDF أو صورة ويستخرج منه الأسئلة بالذكاء الاصطناعي.
+    كل سؤال يُرجع مع 4 اختيارات أ/ب/ج/د وإجابة مقترحة.
+    """
+    try:
+        import base64, json as _json
+
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'يرجى رفع ملف'}), 400
+
+        uploaded_file = request.files['file']
+        filename = uploaded_file.filename or ''
+        file_bytes = uploaded_file.read()
+        points_per_q = int(request.form.get('points', 2))
+        file_ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+        pages_b64 = []  # قائمة صور base64 PNG لكل صفحة
+
+        if file_ext == 'pdf':
+            try:
+                import pymupdf  # PyMuPDF >= 1.24
+                doc = pymupdf.open(stream=file_bytes, filetype='pdf')
+                for page in doc:
+                    mat = pymupdf.Matrix(2.0, 2.0)
+                    pix = page.get_pixmap(matrix=mat)
+                    pages_b64.append(base64.b64encode(pix.tobytes('png')).decode())
+                doc.close()
+            except ImportError:
+                return jsonify({'success': False, 'error': 'مكتبة PyMuPDF غير متاحة'}), 500
+        elif file_ext in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'):
+            pages_b64.append(base64.b64encode(file_bytes).decode())
+        else:
+            return jsonify({'success': False, 'error': 'صيغة الملف غير مدعومة. استخدم PDF أو JPG أو PNG'}), 400
+
+        if not pages_b64:
+            return jsonify({'success': False, 'error': 'الملف فارغ أو لا يحتوي صفحات'}), 400
+
+        # -- إرسال جميع الصفحات لـ Gemini Vision --
+        content_parts = []
+        for b64 in pages_b64:
+            content_parts.append({
+                'inline_data': {'mime_type': 'image/png', 'data': b64}
+            })
+
+        ai_prompt = (
+            "أنت نظام ذكاء اصطناعي متخصص في استخراج أسئلة الاختبارات من صور الورق.\n\n"
+            "مهمتك: استخرج كل سؤال اختيار من متعدد من الصور وأعد إجابة JSON بالتنسيق:\n"
+            "[\n"
+            "  {\n"
+            "    \"question_text\": \"نص السؤال كاملاً\",\n"
+            "    \"options\": [\"نص الاختيار الأول\", \"نص الثاني\", \"نص الثالث\", \"نص الرابع\"],\n"
+            "    \"correct_index\": 0\n"
+            "  }\n"
+            "]\n\n"
+            "القواعد الصارمة:\n"
+            "1. أعد فقط مصفوفة JSON بدون أي نص إضافي أو markdown\n"
+            "2. اكتب نص السؤال والاختيارات كما هو مكتوب في الورقة بدون تعديل\n"
+            "3. correct_index رقم من 0 إلى 3 (0=الأول، 1=الثاني، 2=الثالث، 3=الرابع). إذا لم تعرف اكتب 0\n"
+            "4. أدرج نص الاختيار بدون الحرف/الرقم الذي يسبقه (أ/ب/ج/د أو 1/2/3/4 أو a/b/c/d)\n"
+            "5. استخرج جميع الأسئلة من جميع الصفحات بالترتيب\n"
+            "6. المعادلات الرياضية اكتبها بـ LaTeX داخل علامة $ مثل: $x^2 + y^2 = r^2$"
+        )
+        content_parts.append(ai_prompt)
+
+        model = get_gemini_model()
+        response = model.generate_content(content_parts)
+        raw = response.text.strip()
+
+        # تنظيف markdown
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE)
+        raw = raw.strip()
+
+        try:
+            questions_data = _json.loads(raw)
+        except Exception:
+            m = re.search(r'\[.*\]', raw, re.DOTALL)
+            if m:
+                questions_data = _json.loads(m.group())
+            else:
+                return jsonify({'success': False, 'error': f'تعذر تحليل رد الذكاء الاصطناعي: {raw[:400]}'}), 500
+
+        ARABIC_LABELS = ['أ', 'ب', 'ج', 'د']
+        result_questions = []
+
+        for q in questions_data:
+            opts = list(q.get('options') or [])
+            while len(opts) < 4:
+                opts.append('')
+
+            correct_idx = int(q.get('correct_index', 0))
+            if not (0 <= correct_idx <= 3):
+                correct_idx = 0
+
+            # الاختيارات بصيغة "أ - نص"
+            formatted_options = [
+                f"{ARABIC_LABELS[i]} - {opts[i]}" if opts[i] else ARABIC_LABELS[i]
+                for i in range(4)
+            ]
+
+            result_questions.append({
+                'question_text': q.get('question_text', ''),
+                'question_type': 'mcq',
+                'options': formatted_options,
+                'correct_answer': ARABIC_LABELS[correct_idx],
+                'points': points_per_q,
+                'question_image_url': '',
+                'correct_answer_image_url': '',
+            })
+
+        return jsonify({
+            'success': True,
+            'count': len(result_questions),
+            'questions': result_questions,
+            'pages_processed': len(pages_b64)
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'خطأ أثناء الاستخراج: {str(e)}'}), 500
+
+
 # ============ AI Math Homework Hint Assistant ============
 
 @exams_bp.route('/api/ai/math-hint', methods=['POST'])
