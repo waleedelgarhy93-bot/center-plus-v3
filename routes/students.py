@@ -327,8 +327,31 @@ def create_parent_account(student_id):
             .eq('role', 'parent')\
             .execute()
 
+        data = request.get_json(silent=True) or {}
+        reset_password = bool(data.get('reset_password', False))
+
         if existing.data:
             parent = existing.data[0]
+            if reset_password:
+                from helpers import hash_password
+                new_password = ''.join(random.choices(string.digits, k=8))
+                supabase.table('users').update({
+                    'password': hash_password(new_password)
+                }).eq('id', parent['id']).execute()
+                return jsonify({
+                    'success': True,
+                    'already_exists': False,
+                    'reset': True,
+                    'message': f"تم تجديد كلمة مرور ولي أمر {student['name']}",
+                    'parent': {
+                        'id': parent['id'],
+                        'username': parent['username'],
+                        'password': new_password,
+                        'full_name': parent.get('full_name'),
+                        'student_name': student['name'],
+                        'student_id': student_id
+                    }
+                })
             return jsonify({
                 'success': True,
                 'already_exists': True,
@@ -337,7 +360,8 @@ def create_parent_account(student_id):
                     'id': parent['id'],
                     'username': parent['username'],
                     'full_name': parent.get('full_name'),
-                    'student_name': student['name']
+                    'student_name': student['name'],
+                    'student_id': student_id
                 }
             })
 
