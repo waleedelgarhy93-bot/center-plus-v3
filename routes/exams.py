@@ -591,14 +591,114 @@ def submit_exam(exam_id):
             'total_grade': auto_grade
         }).eq('id', submission_id).execute()
 
+        # جلب بيانات الطالب للرد بالإيصال
+        student_info = {}
+        try:
+            st_res = supabase.table('students').select('id, name, barcode, phone, group_id, groups(grade, center)').eq('id', request.user_id).execute()
+            if st_res.data:
+                student_info = st_res.data[0]
+        except Exception:
+            pass
+
         return jsonify({
             'success': True,
-            'message': 'تم تسليم الاختبار',
+            'message': 'تم تسليم الاختبار بنجاح',
             'submission_id': submission_id,
             'auto_grade': auto_grade,
             'max_grade': exam.get('max_grade', 100),
-            'has_essay': has_essay
+            'has_essay': has_essay,
+            'show_result': exam.get('show_result', True),
+            'receipt': {
+                'submission_id': submission_id,
+                'receipt_code': f"REC-{exam_id}-{submission_id}",
+                'exam_id': exam_id,
+                'exam_title': exam.get('title'),
+                'exam_type': exam.get('exam_type', 'exam'),
+                'student_name': student_info.get('name', ''),
+                'student_barcode': student_info.get('barcode', ''),
+                'grade_level': (student_info.get('groups') or {}).get('grade', '') if isinstance(student_info.get('groups'), dict) else '',
+                'center_name': (student_info.get('groups') or {}).get('center', '') if isinstance(student_info.get('groups'), dict) else '',
+                'submitted_at': new_submission.data[0].get('submitted_at') or new_submission.data[0].get('created_at'),
+                'total_grade': auto_grade if exam.get('show_result', True) else None,
+                'max_grade': exam.get('max_grade', 100),
+                'show_result': exam.get('show_result', True),
+                'has_essay': has_essay,
+                'questions_count': len(questions_map),
+                'answered_count': len(answers)
+            }
         }), 201
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============ Exam Receipt (Student) ============
+
+@exams_bp.route('/api/exams/<int:exam_id>/receipt', methods=['GET'])
+@token_required
+def get_exam_receipt(exam_id):
+    """إيصال تسليم الاختبار للطالب"""
+    try:
+        submission_res = supabase.table('student_exams')\
+            .select('*')\
+            .eq('exam_id', exam_id)\
+            .eq('student_id', request.user_id)\
+            .execute()
+
+        if not submission_res.data:
+            return jsonify({'success': False, 'error': 'لم يتم العثور على تسليم لهذا الاختبار'}), 404
+
+        submission = submission_res.data[0]
+
+        exam_res = supabase.table('exams').select('*').eq('id', exam_id).execute()
+        exam = exam_res.data[0] if exam_res.data else {}
+
+        student_info = {}
+        try:
+            st_res = supabase.table('students').select('id, name, barcode, phone, group_id, groups(grade, center)').eq('id', request.user_id).execute()
+            if st_res.data:
+                student_info = st_res.data[0]
+        except Exception:
+            pass
+
+        # عدد الأسئلة والإجابات
+        questions_res = supabase.table('questions').select('id').eq('exam_id', exam_id).execute()
+        total_questions = len(questions_res.data or [])
+
+        answers_res = supabase.table('student_answers').select('id, answer, answer_image_url').eq('student_exam_id', submission['id']).execute()
+        answered_count = len([a for a in (answers_res.data or []) if a.get('answer') or a.get('answer_image_url')])
+
+        groups_data = student_info.get('groups') or {}
+        grade_name = groups_data.get('grade', '') if isinstance(groups_data, dict) else ''
+        center_name = groups_data.get('center', '') if isinstance(groups_data, dict) else ''
+
+        show_result = exam.get('show_result', True)
+
+        receipt = {
+            'submission_id': submission['id'],
+            'receipt_code': f"REC-{exam_id}-{submission['id']}",
+            'exam_id': exam_id,
+            'exam_title': exam.get('title', ''),
+            'exam_type': exam.get('exam_type', 'exam'),
+            'student_id': request.user_id,
+            'student_name': student_info.get('name', ''),
+            'student_barcode': student_info.get('barcode', ''),
+            'grade_level': grade_name,
+            'center_name': center_name,
+            'submitted_at': submission.get('submitted_at') or submission.get('created_at'),
+            'total_grade': submission.get('total_grade') if show_result else None,
+            'max_grade': submission.get('max_grade') or exam.get('max_grade', 100),
+            'show_result': show_result,
+            'questions_count': total_questions,
+            'answered_count': answered_count,
+            'status': submission.get('status', 'submitted')
+        }
+
+        return jsonify({
+            'success': True,
+            'receipt': receipt
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
