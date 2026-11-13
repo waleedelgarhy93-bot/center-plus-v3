@@ -190,12 +190,13 @@ def generate_card():
         card_type = data.get('card_type', 'student')
         tenant_id = get_tenant_for_insert()
 
-        # توليد barcode فريد
+        existing_res = supabase.table('cards').select('barcode').execute()
+        existing_barcodes = {r['barcode'] for r in (existing_res.data or []) if r.get('barcode')}
+
         barcode = None
-        for _ in range(20):
+        for _ in range(50):
             candidate = ''.join(random.choices(string.digits, k=4))
-            check = supabase.table('cards').select('id').eq('barcode', candidate).execute()
-            if not check.data:
+            if candidate not in existing_barcodes:
                 barcode = candidate
                 break
 
@@ -243,6 +244,11 @@ def generate_cards_batch():
         if not students:
             return jsonify({'success': False, 'error': 'لا يوجد طلاب'}), 404
 
+        existing_cards_res = supabase.table('cards').select('barcode, student_id').execute()
+        all_cards_data = existing_cards_res.data or []
+        used_barcodes = {c['barcode'] for c in all_cards_data if c.get('barcode')}
+        students_with_cards = {c['student_id']: c['barcode'] for c in all_cards_data if c.get('student_id')}
+
         generated_cards = []
         skipped = []
 
@@ -255,22 +261,21 @@ def generate_cards_batch():
                 })
                 continue
 
-            existing = supabase.table('cards').select('*').eq('student_id', student['id']).execute()
-            if existing.data:
+            if student['id'] in students_with_cards:
                 skipped.append({
                     'student_id': student['id'],
                     'student_name': student['name'],
                     'reason': 'عنده كارت بالفعل',
-                    'barcode': existing.data[0]['barcode']
+                    'barcode': students_with_cards[student['id']]
                 })
                 continue
 
             barcode = None
-            for _ in range(20):
+            for _ in range(50):
                 candidate = ''.join(random.choices(string.digits, k=4))
-                check = supabase.table('cards').select('id').eq('barcode', candidate).execute()
-                if not check.data:
+                if candidate not in used_barcodes:
                     barcode = candidate
+                    used_barcodes.add(candidate)
                     break
 
             if not barcode:
@@ -303,7 +308,7 @@ def generate_cards_batch():
                 enriched.append({
                     **card,
                     'student_name': student['name'],
-                    'student_grade': student.get('grade'),
+                    'student_barcode': student.get('barcode'),
                 })
 
         return jsonify({
