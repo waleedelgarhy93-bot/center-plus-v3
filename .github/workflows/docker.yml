@@ -35,4 +35,6 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ steps.repo.outputs.NAME }}:latest
+          tags: |
+            ghcr.io/waleedelgarhy93-bot/centerbackend:latest
+            ghcr.io/waleedelgarhy93-bot/center-plus-v3:latest
