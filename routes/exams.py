@@ -646,8 +646,14 @@ def get_exam_receipt(exam_id):
             .eq('student_id', request.user_id)\
             .execute()
 
+        # Fallback: إذا تم تمرير submission_id بدلاً من exam_id
         if not submission_res.data:
-            return jsonify({'success': False, 'error': 'لم يتم العثور على تسليم لهذا الاختبار'}), 404
+            sub_res = supabase.table('student_exams').select('*').eq('id', exam_id).eq('student_id', request.user_id).execute()
+            if sub_res.data:
+                submission_res = sub_res
+                exam_id = sub_res.data[0]['exam_id']
+            else:
+                return jsonify({'success': False, 'error': 'لم يتم العثور على تسليم لهذا الاختبار'}), 404
 
         submission = submission_res.data[0]
 
@@ -717,8 +723,14 @@ def get_my_exam_result(exam_id):
             .eq('student_id', request.user_id)\
             .execute()
 
+        # Fallback: إذا تم تمرير submission_id بدلاً من exam_id
         if not submission_res.data:
-            return jsonify({'success': False, 'error': 'لم تسلّم هذا الاختبار'}), 404
+            sub_res = supabase.table('student_exams').select('*').eq('id', exam_id).eq('student_id', request.user_id).execute()
+            if sub_res.data:
+                submission_res = sub_res
+                exam_id = sub_res.data[0]['exam_id']
+            else:
+                return jsonify({'success': False, 'error': 'لم تسلّم هذا الاختبار'}), 404
 
         submission = submission_res.data[0]
 
@@ -757,6 +769,8 @@ def get_my_exam_result(exam_id):
                 'ai_feedback': ans.get('ai_feedback'),
                 'graded_by': ans.get('graded_by', 'pending'),
                 'correct_answer': q.get('correct_answer') if show_correct else None,
+                'correct_answer_image_url': q.get('correct_answer_image_url') if show_correct else None,
+                'explanation': q.get('explanation') if show_correct else None,
             })
 
         return jsonify({
@@ -764,6 +778,7 @@ def get_my_exam_result(exam_id):
             'exam': {
                 'id': exam.get('id'),
                 'title': exam.get('title'),
+                'exam_type': exam.get('exam_type', 'exam'),
                 'max_grade': exam.get('max_grade'),
                 'show_result': exam.get('show_result', True),
             },
