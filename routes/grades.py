@@ -153,21 +153,20 @@ def delete_grade(grade_id):
 @grades_bp.route('/api/grades/all', methods=['GET'])
 @token_required
 def get_all_grades():
-    """كل الدرجات مع الفلاتر + إحصائيات"""
+    """كل الدرجات مع الفلاتر + إحصائيات مع دعم دقيق لمجموعات الطلاب والامتحانات متعددة المجموعات"""
     try:
         subject_id = request.args.get('subject_id', type=int)
         group_id = request.args.get('group_id', type=int)
         exam_id = request.args.get('exam_id', type=int)
+        grade_level = request.args.get('grade_level', type=str)
         month = request.args.get('month', type=str)
 
-        # 1) الاختبارات
+        # 1) جلب اختبارات المستأجر
         exams_query = supabase.table('exams').select('*')
         exams_query = apply_tenant_filter(exams_query)
 
         if subject_id:
             exams_query = exams_query.eq('subject_id', subject_id)
-        if group_id:
-            exams_query = exams_query.eq('group_id', group_id)
         if exam_id:
             exams_query = exams_query.eq('id', exam_id)
 
@@ -190,9 +189,7 @@ def get_all_grades():
         subs_res = subs_query.execute()
         submissions = subs_res.data or []
 
-        # 3) الطلاب
-        student_ids = list({s['student_id'] for s in submissions})
-        if not student_ids:
+        if not submissions:
             return jsonify({
                 'success': True,
                 'count': 0,
@@ -200,26 +197,49 @@ def get_all_grades():
                 'stats': {'average': 0, 'highest': 0, 'lowest': 0, 'total': 0}
             })
 
+        # 3) جلب بيانات الطلاب الفعلية
+        student_ids = list({s['student_id'] for s in submissions})
         students_res = supabase.table('students')\
-            .select('id, name, barcode, group_id')\
+            .select('id, name, barcode, phone, group_id')\
             .in_('id', student_ids)\
             .execute()
         students = {s['id']: s for s in (students_res.data or [])}
 
-        # 4) المجموعات والمواد
-        group_ids = list({e.get('group_id') for e in exams.values() if e.get('group_id')})
-        groups_map = {}
-        if group_ids:
-            groups_res = supabase.table('groups').select('id, grade, center').in_('id', group_ids).execute()
-            groups_map = {g['id']: f"{g['grade']} - {g['center']}" for g in (groups_res.data or [])}
+        # 4) جلب مجموعات الاختبارات المرتبطة من جدول exam_groups
+        eg_res = supabase.table('exam_groups').select('exam_id, group_id').in_('exam_id', list(exams.keys())).execute()
+        exam_to_groups = {}
+        for eg in (eg_res.data or []):
+            exam_to_groups.setdefault(eg['exam_id'], set()).add(eg['group_id'])
 
+        # 5) جلب كل المجموعات المرتبطة بالطلاب والامتحانات
+        all_group_ids = set()
+        for s in students.values():
+            if s.get('group_id'):
+                all_group_ids.add(s['group_id'])
+        for e in exams.values():
+            if e.get('group_id'):
+                all_group_ids.add(e['group_id'])
+        for g_set in exam_to_groups.values():
+            all_group_ids.update(g_set)
+
+        groups_map = {}
+        if all_group_ids:
+            groups_res = supabase.table('groups').select('id, grade, center').in_('id', list(all_group_ids)).execute()
+            for g in (groups_res.data or []):
+                groups_map[g['id']] = {
+                    'name': f"{g.get('grade', '')} - {g.get('center', '')}".strip(' -'),
+                    'grade': g.get('grade', ''),
+                    'center': g.get('center', '')
+                }
+
+        # المواد
         subject_ids = list({e.get('subject_id') for e in exams.values() if e.get('subject_id')})
         subjects_map = {}
         if subject_ids:
             subjects_res = supabase.table('subjects').select('id, name').in_('id', subject_ids).execute()
             subjects_map = {s['id']: s['name'] for s in (subjects_res.data or [])}
 
-        # 5) تجميع
+        # 6) تجميع الدرجات وتطبيق الفلاتر بدقة
         grades_list = []
         total_grade = 0
         total_max = 0
@@ -233,8 +253,33 @@ def get_all_grades():
             if not exam or not student:
                 continue
 
-            if subject_id and exam.get('subject_id') != subject_id:
-                continue
+            student_group_id = student.get('group_id')
+            exam_assigned_groups = exam_to_groups.get(exam['id'], set())
+            if exam.get('group_id'):
+                exam_assigned_groups.add(exam['group_id'])
+
+            # جلب تفاصيل مجموعة الطالب
+            st_group_info = groups_map.get(student_group_id) or groups_map.get(exam.get('group_id')) or {}
+            st_grade_level = st_group_info.get('grade', '')
+
+            # فلتر الصف الدراسي (grade_level)
+            if grade_level and grade_level.strip() and grade_level != 'all':
+                normalized_target = grade_level.replace('الصف ', '').strip()
+                normalized_grade = st_grade_level.replace('الصف ', '').strip()
+                if normalized_target not in normalized_grade and normalized_grade not in normalized_target:
+                    continue
+
+            # فلتر المجموعة (group_id)
+            if group_id:
+                if student_group_id:
+                    if student_group_id != group_id:
+                        continue
+                else:
+                    if group_id not in exam_assigned_groups:
+                        continue
+
+            display_group_id = student_group_id or exam.get('group_id')
+            display_group_name = st_group_info.get('name', 'عام')
 
             g = float(sub.get('total_grade', 0))
             m = float(sub.get('max_grade', exam.get('max_grade', 100)))
@@ -245,8 +290,10 @@ def get_all_grades():
                 'student_id': student['id'],
                 'student_name': student['name'],
                 'student_barcode': student.get('barcode'),
-                'group_id': exam.get('group_id'),
-                'group_name': groups_map.get(exam.get('group_id')),
+                'group_id': display_group_id,
+                'group_name': display_group_name,
+                'grade_level': st_grade_level,
+                'center_name': st_group_info.get('center', ''),
                 'exam_id': exam['id'],
                 'exam_title': exam['title'],
                 'subject_id': exam.get('subject_id'),
@@ -264,7 +311,7 @@ def get_all_grades():
             lowest = min(lowest, pct)
             count += 1
 
-        grades_list.sort(key=lambda x: x.get('submitted_at', ''), reverse=True)
+        grades_list.sort(key=lambda x: x.get('submitted_at') or '', reverse=True)
 
         average = (total_grade / total_max * 100) if total_max > 0 else 0
         lowest = lowest if lowest != 999999 else 0
@@ -281,4 +328,6 @@ def get_all_grades():
             }
         })
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
