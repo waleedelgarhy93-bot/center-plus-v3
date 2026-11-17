@@ -359,7 +359,7 @@ def get_student_documents():
             documents += (extra_res.data or [])
 
         # فلترة نهائية: بس المذكرات الموجّهة لمجموعات الطالب
-        documents = filter_content_for_student('documents', documents, get_student_access(request.user_id))
+        documents = filter_content_for_student('documents', documents, get_student_access(request.user_id, request.args.get('group_id', type=int)))
 
         if documents:
             subject_ids = list({d['subject_id'] for d in documents if d.get('subject_id')})

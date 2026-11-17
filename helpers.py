@@ -238,8 +238,9 @@ CONTENT_LINKS = {
 }
 
 
-def get_student_access(student_id):
-    """بيانات اشتراك الطالب: السنتر + المجموعات + المواد + الصفوف"""
+def get_student_access(student_id, only_group_id=None):
+    """بيانات اشتراك الطالب: السنتر + المجموعات + المواد + الصفوف
+    only_group_id: لو الطالب فاتح مادة من مجموعة معينة، نحصر المحتوى في المجموعة دي بس"""
     st = supabase.table('students').select('id, tenant_id, group_id').eq('id', student_id).execute()
     if not st.data:
         return None
@@ -248,6 +249,8 @@ def get_student_access(student_id):
     group_ids = {r['group_id'] for r in (sg.data or []) if r.get('group_id')}
     if student.get('group_id'):
         group_ids.add(student['group_id'])
+    if only_group_id and only_group_id in group_ids:
+        group_ids = {only_group_id}
     groups = []
     if group_ids:
         groups = supabase.table('groups').select('id, subject_id, grade').in_('id', list(group_ids)).execute().data or []

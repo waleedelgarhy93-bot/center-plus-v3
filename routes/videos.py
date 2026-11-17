@@ -327,7 +327,7 @@ def get_student_videos():
             videos += (extra_res.data or [])
 
         # فلترة نهائية: بس المحتوى الموجّه لمجموعات الطالب
-        videos = filter_content_for_student('videos', videos, get_student_access(request.user_id))
+        videos = filter_content_for_student('videos', videos, get_student_access(request.user_id, request.args.get('group_id', type=int)))
 
         # جلب المشاهدات الحالية للطالب
         views_res = supabase.table('video_views').select('*').eq('student_id', request.user_id).execute()

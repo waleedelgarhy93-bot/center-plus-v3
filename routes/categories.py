@@ -34,7 +34,7 @@ def get_categories():
 
         # الطالب: بس فروع/تصنيفات مادته وصفه
         if getattr(request, 'user_role', None) == 'student':
-            _access = get_student_access(request.user_id)
+            _access = get_student_access(request.user_id, request.args.get('group_id', type=int))
             categories = [r for r in categories if student_matches_grade_subject(r, _access)]
 
         if categories:
@@ -121,7 +121,7 @@ def get_branches_alias():
 
         # الطالب: بس فروع/تصنيفات مادته وصفه
         if getattr(request, 'user_role', None) == 'student':
-            _access = get_student_access(request.user_id)
+            _access = get_student_access(request.user_id, request.args.get('group_id', type=int))
             branches = [r for r in branches if student_matches_grade_subject(r, _access)]
 
         if branches:

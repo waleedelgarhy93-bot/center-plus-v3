@@ -435,7 +435,7 @@ def get_student_exams():
             exams += (extra_res.data or [])
 
         # فلترة نهائية: بس الامتحانات الموجّهة لمجموعات الطالب
-        exams = filter_content_for_student('exams', exams, get_student_access(request.user_id))
+        exams = filter_content_for_student('exams', exams, get_student_access(request.user_id, request.args.get('group_id', type=int)))
 
         submissions_res = supabase.table('student_exams')\
             .select('*')\
