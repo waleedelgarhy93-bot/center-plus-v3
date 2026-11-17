@@ -6,6 +6,8 @@ from helpers import (
     apply_tenant_filter,
     get_tenant_for_insert,
     check_tenant_ownership,
+    get_student_access,
+    student_matches_grade_subject,
 )
 
 categories_bp = Blueprint('categories', __name__)
@@ -29,6 +31,11 @@ def get_categories():
 
         res = query.execute()
         categories = res.data or []
+
+        # الطالب: بس فروع/تصنيفات مادته وصفه
+        if getattr(request, 'user_role', None) == 'student':
+            _access = get_student_access(request.user_id)
+            categories = [r for r in categories if student_matches_grade_subject(r, _access)]
 
         if categories:
             sub_ids = list({c['subject_id'] for c in categories if c.get('subject_id')})
@@ -111,6 +118,11 @@ def get_branches_alias():
 
         res = query.execute()
         branches = res.data or []
+
+        # الطالب: بس فروع/تصنيفات مادته وصفه
+        if getattr(request, 'user_role', None) == 'student':
+            _access = get_student_access(request.user_id)
+            branches = [r for r in branches if student_matches_grade_subject(r, _access)]
 
         if branches:
             sub_ids = list({b['subject_id'] for b in branches if b.get('subject_id')})

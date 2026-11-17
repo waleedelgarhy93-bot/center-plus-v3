@@ -11,6 +11,9 @@ from helpers import (
     get_tenant_for_insert,
     get_current_tenant_id,
     check_tenant_ownership,
+    get_student_access,
+    filter_content_for_student,
+    student_can_access_content,
 )
 
 exams_bp = Blueprint('exams', __name__)
@@ -431,6 +434,9 @@ def get_student_exams():
             extra_res = extra_q.execute()
             exams += (extra_res.data or [])
 
+        # فلترة نهائية: بس الامتحانات الموجّهة لمجموعات الطالب
+        exams = filter_content_for_student('exams', exams, get_student_access(request.user_id))
+
         submissions_res = supabase.table('student_exams')\
             .select('*')\
             .eq('student_id', request.user_id)\
@@ -466,6 +472,8 @@ def take_exam(exam_id):
         exam = exam_res.data[0]
         if not exam.get('is_published'):
             return jsonify({'success': False, 'error': 'الاختبار غير منشور'}), 403
+        if getattr(request, 'user_role', None) == 'student' and not student_can_access_content('exams', exam):
+            return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
 
         existing = supabase.table('student_exams')\
             .select('*')\
@@ -523,6 +531,8 @@ def submit_exam(exam_id):
             return jsonify({'success': False, 'error': 'الاختبار غير موجود'}), 404
 
         exam = exam_res.data[0]
+        if not exam.get('is_published') or not student_can_access_content('exams', exam):
+            return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
 
         questions_res = supabase.table('questions').select('*').eq('exam_id', exam_id).execute()
         questions_map = {q['id']: q for q in (questions_res.data or [])}

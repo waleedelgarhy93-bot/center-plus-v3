@@ -13,6 +13,9 @@ from helpers import (
     get_tenant_for_insert,
     get_current_tenant_id,
     check_tenant_ownership,
+    get_student_access,
+    filter_content_for_student,
+    student_can_access_content,
 )
 
 documents_bp = Blueprint('documents', __name__)
@@ -190,6 +193,11 @@ def get_document(doc_id):
             return jsonify({'success': False, 'error': 'المذكرة غير موجودة'}), 404
 
         doc = res.data[0]
+        if getattr(request, 'user_role', None) == 'student':
+            if not student_can_access_content('documents', doc):
+                return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
+        elif not check_tenant_ownership(doc):
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
         if doc.get('subject_id'):
             sub_res = supabase.table('subjects').select('name').eq('id', doc['subject_id']).execute()
             if sub_res.data:
@@ -349,6 +357,9 @@ def get_student_documents():
         if remaining_ids:
             extra_res = supabase.table('documents').select('*').in_('id', remaining_ids).execute()
             documents += (extra_res.data or [])
+
+        # فلترة نهائية: بس المذكرات الموجّهة لمجموعات الطالب
+        documents = filter_content_for_student('documents', documents, get_student_access(request.user_id))
 
         if documents:
             subject_ids = list({d['subject_id'] for d in documents if d.get('subject_id')})

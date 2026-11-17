@@ -8,6 +8,9 @@ from helpers import (
     apply_tenant_filter,
     get_tenant_for_insert,
     check_tenant_ownership,
+    get_student_access,
+    filter_content_for_student,
+    student_can_access_content,
 )
 
 videos_bp = Blueprint('videos', __name__)
@@ -323,6 +326,9 @@ def get_student_videos():
             extra_res = supabase.table('videos').select('*').in_('id', remaining_ids).execute()
             videos += (extra_res.data or [])
 
+        # فلترة نهائية: بس المحتوى الموجّه لمجموعات الطالب
+        videos = filter_content_for_student('videos', videos, get_student_access(request.user_id))
+
         # جلب المشاهدات الحالية للطالب
         views_res = supabase.table('video_views').select('*').eq('student_id', request.user_id).execute()
         views_map = {v['video_id']: v for v in (views_res.data or [])}
@@ -406,6 +412,8 @@ def record_video_view(video_id):
             return jsonify({'success': False, 'error': 'الفيديو غير موجود'}), 404
 
         video = video_res.data[0]
+        if getattr(request, 'user_role', None) == 'student' and not student_can_access_content('videos', video):
+            return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
         max_views = video.get('max_views', 0)
 
         # 1. فحص الحظر
@@ -471,6 +479,8 @@ def unlock_video_with_code(video_id):
             return jsonify({'success': False, 'error': 'الفيديو غير موجود'}), 404
 
         video = video_res.data[0]
+        if not student_can_access_content('videos', video):
+            return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
         actual_code = str(video.get('access_code') or '').strip()
 
         if not actual_code:

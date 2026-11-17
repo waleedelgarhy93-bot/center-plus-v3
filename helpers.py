@@ -223,3 +223,117 @@ def check_tenant_ownership(record: dict) -> bool:
         return False
 
     return record.get('tenant_id') == tenant_id
+
+
+# ============ Student Content Visibility ============
+# الطالب يشوف المحتوى (فيديو/امتحان/واجب/مذكرة) بس لو:
+#   1) من نفس السنتر، و
+#   2) المحتوى متوجّه لمجموعة من مجموعاته (group_id أو جدول الربط)، أو
+#   3) المحتوى "عام" (من غير مجموعات) وهو في مادة الطالب مشترك فيها بمجموعة من نفس الصف.
+
+CONTENT_LINKS = {
+    'videos': ('video_groups', 'video_id'),
+    'exams': ('exam_groups', 'exam_id'),
+    'documents': ('document_groups', 'document_id'),
+}
+
+
+def get_student_access(student_id):
+    """بيانات اشتراك الطالب: السنتر + المجموعات + المواد + الصفوف"""
+    st = supabase.table('students').select('id, tenant_id, group_id').eq('id', student_id).execute()
+    if not st.data:
+        return None
+    student = st.data[0]
+    sg = supabase.table('student_groups').select('group_id').eq('student_id', student_id).execute()
+    group_ids = {r['group_id'] for r in (sg.data or []) if r.get('group_id')}
+    if student.get('group_id'):
+        group_ids.add(student['group_id'])
+    groups = []
+    if group_ids:
+        groups = supabase.table('groups').select('id, subject_id, grade').in_('id', list(group_ids)).execute().data or []
+    return {
+        'student_id': student_id,
+        'tenant_id': student.get('tenant_id'),
+        'group_ids': group_ids,
+        'subject_ids': {g['subject_id'] for g in groups if g.get('subject_id')},
+        'grades': {g['grade'] for g in groups if g.get('grade')},
+    }
+
+
+def _content_group_map(table, item_ids):
+    link_table, fk = CONTENT_LINKS[table]
+    if not item_ids:
+        return {}
+    rows = supabase.table(link_table).select(f'{fk}, group_id').in_(fk, list(item_ids)).execute().data or []
+    m = {}
+    for r in rows:
+        m.setdefault(r[fk], set()).add(r['group_id'])
+    return m
+
+
+def _student_sees(item, linked_groups, access):
+    if not access or item.get('tenant_id') != access['tenant_id']:
+        return False
+    target = set(linked_groups or set())
+    if item.get('group_id'):
+        target.add(item['group_id'])
+    if target:
+        return bool(target & access['group_ids'])
+    # محتوى عام: لازم الطالب يكون مشترك في نفس المادة
+    subject_id = item.get('subject_id')
+    return subject_id is None or subject_id in access['subject_ids']
+
+
+def filter_content_for_student(table, items, access):
+    """يرجّع بس العناصر اللي الطالب مسموح له يشوفها"""
+    gm = _content_group_map(table, [i['id'] for i in items])
+    return [i for i in items if _student_sees(i, gm.get(i['id']), access)]
+
+
+def student_can_access_content(table, item, student_id=None):
+    """فحص عنصر واحد (فيديو/امتحان/مذكرة) لطالب"""
+    access = get_student_access(student_id or request.user_id)
+    gm = _content_group_map(table, [item['id']])
+    return _student_sees(item, gm.get(item['id']), access)
+
+
+# ============ Grade normalization ============
+# أسماء الصفوف مكتوبة بأكتر من شكل ("أولى ثانوي" / "الأول الثانوي" / "الأول الثانوي (الصف العاشر)")
+
+_STAGES = (('ثانوي', 'sec'), ('اعدادي', 'prep'), ('إعدادي', 'prep'), ('ابتدائي', 'pri'))
+_LEVELS = (('أول', 1), ('اول', 1), ('أولى', 1), ('اولى', 1), ('ثاني', 2), ('تاني', 2), ('تانية', 2), ('ثانية', 2),
+           ('ثالث', 3), ('تالت', 3), ('تالتة', 3), ('ثالثة', 3), ('رابع', 4), ('خامس', 5), ('سادس', 6),
+           ('1', 1), ('2', 2), ('3', 3), ('١', 1), ('٢', 2), ('٣', 3))
+
+
+def normalize_grade(grade):
+    """يرجّع (المرحلة, السنة) أو None"""
+    if not grade:
+        return None
+    g = str(grade).split('(')[0]
+    stage = next((code for word, code in _STAGES if word in g), None)
+    level = None
+    for w in g.split():
+        w = w[2:] if w.startswith('ال') else w
+        if any(w.startswith(st) for st, _ in _STAGES):
+            continue
+        level = next((num for word, num in _LEVELS if w.startswith(word)), None)
+        if level:
+            break
+    return (stage, level) if stage and level else None
+
+
+def student_matches_grade_subject(record, access):
+    """للفروع/التصنيفات: نفس مادة الطالب، ونفس صفه (لو الصف متحدد)"""
+    if not access:
+        return False
+    if record.get('subject_id') and record['subject_id'] not in access['subject_ids']:
+        return False
+    if record.get('grade'):
+        student_grades = {normalize_grade(g) for g in access['grades']} - {None}
+        rg = normalize_grade(record['grade'])
+        if rg is None:
+            return record['grade'] in access['grades']
+        return rg in student_grades
+    return True
+
