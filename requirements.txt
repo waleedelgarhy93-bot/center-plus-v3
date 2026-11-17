@@ -20,3 +20,5 @@ PyJWT==2.15.1
 python-dotenv==1.2.4
 requests==2.34.2
 gunicorn==21.2.0
+# PDF / image processing (استيراد الامتحانات من PDF)
+PyMuPDF==1.26.7

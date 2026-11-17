@@ -39,6 +39,39 @@ def get_supabase() -> Client:
     return supabase
 
 
+# موديلات بديلة بالترتيب: لو الأول مشغول (503) أو وصل للحد (429) أو اتأخر، نجرب اللي بعده
+GEMINI_MODEL_CHAIN = ['gemini-3.5-flash', 'gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.5-flash-lite']
+_RETRYABLE = ('503', '429', '504', '500', '404', 'not found', 'no longer available', 'unavailable', 'high demand', 'overloaded',
+              'resource_exhausted', 'quota', 'deadline', 'timed out', 'timeout')
+
+
+def generate_with_fallback(contents, total_budget=105, per_try=80):
+    """توليد بالذكاء الاصطناعي مع تجربة موديلات بديلة.
+    - من غير retry داخلي طويل (المكتبة كانت بتعيد المحاولة لحد 10 دقايق وتعلّق الطلب)
+    - مجموع الوقت أقل من timeout بتاع gunicorn (120 ثانية)"""
+    import time
+    deadline = time.time() + total_budget
+    errors = []
+    for name in GEMINI_MODEL_CHAIN:
+        remaining = deadline - time.time()
+        if remaining < 10:
+            break
+        try:
+            model = genai.GenerativeModel(name)
+            return model.generate_content(
+                contents,
+                request_options={'timeout': min(per_try, remaining), 'retry': None},
+            )
+        except Exception as e:
+            msg = str(e)
+            errors.append(f'{name}: {msg[:200]}')
+            print(f'[gemini] {name} failed: {msg[:200]}')
+            if any(k in msg.lower() for k in _RETRYABLE):
+                continue
+            raise
+    raise RuntimeError('AI_BUSY | ' + ' || '.join(errors))
+
+
 def get_gemini_model():
     """يرجّع Gemini model السريع والمستقر مع بدائل"""
     try:

@@ -4,7 +4,7 @@ import json
 import re
 import urllib.request
 
-from db import supabase, get_gemini_model
+from db import supabase, get_gemini_model, generate_with_fallback
 from helpers import (
     token_required,
     apply_tenant_filter,
@@ -17,6 +17,70 @@ from helpers import (
 )
 
 exams_bp = Blueprint('exams', __name__)
+
+
+# ============ تنظيف وتظبيط رسومات الـ SVG اللي بيولدها الذكاء الاصطناعي ============
+
+_WESTERN_TO_INDIC = str.maketrans('0123456789', '٠١٢٣٤٥٦٧٨٩')
+_INDIC_TO_WESTERN = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
+
+
+def clean_ai_svg(svg, math_symbols='english'):
+    """يرجّع SVG نضيف وآمن ومتظبط، أو None لو الرسم بايظ (مقطوع أو مش XML سليم).
+    - يشيل أي script / foreignObject / on*= / javascript: (أمان)
+    - يخلي الرسم responsive (width=100%) مع viewBox
+    - يحط خلفية بيضا وخط بيدعم العربي
+    - يوحّد الأرقام اللي على الرسم مع نوع الرموز (هندي للعربي / إنجليزي للإنجليزي)
+    """
+    if not svg or not isinstance(svg, str):
+        return None
+    s = svg.strip()
+    s = re.sub(r'^```(?:svg|xml|html)?\s*|\s*```$', '', s)
+    start, end = s.find('<svg'), s.rfind('</svg>')
+    if start == -1 or end == -1:
+        return None  # الرسم مقطوع
+    s = s[start:end + len('</svg>')]
+
+    # أمان
+    s = re.sub(r'<script\b[\s\S]*?</script\s*>', '', s, flags=re.I)
+    s = re.sub(r'<foreignObject\b[\s\S]*?</foreignObject\s*>', '', s, flags=re.I)
+    s = re.sub(r'\son[a-z]+\s*=\s*("[^"]*"|\'[^\']*\')', '', s, flags=re.I)
+    s = re.sub(r'(href\s*=\s*["\'])\s*javascript:[^"\']*', r'\1#', s, flags=re.I)
+
+    m = re.match(r'<svg\b([^>]*)>', s)
+    if not m:
+        return None
+    attrs = m.group(1)
+    if 'xmlns=' not in attrs:
+        attrs = ' xmlns="http://www.w3.org/2000/svg"' + attrs
+    if not re.search(r'\bviewBox\s*=', attrs):
+        w = re.search(r'\bwidth\s*=\s*["\']?([\d.]+)', attrs)
+        h = re.search(r'\bheight\s*=\s*["\']?([\d.]+)', attrs)
+        vb = f'0 0 {w.group(1)} {h.group(1)}' if (w and h) else '0 0 380 240'
+        attrs += f' viewBox="{vb}"'
+    # responsive: نشيل المقاسات الثابتة من الوسم الرئيسي بس
+    attrs = re.sub(r'\s(width|height)\s*=\s*("[^"]*"|\'[^\']*\'|[\d.]+%?)', '', attrs)
+    attrs += ' width="100%" preserveAspectRatio="xMidYMid meet"'
+    if 'font-family' not in attrs:
+        attrs += ' font-family="Tahoma, \'Segoe UI\', Arial, sans-serif"'
+    s = '<svg' + attrs + '>' + s[m.end():]
+
+    # خلفية بيضا لو مفيش (عشان الرسم ما يبقاش شفاف على خلفيات غامقة)
+    if not re.search(r'<rect\b[^>]*fill\s*=\s*["\'](#fff\b|#ffffff|white|#f8fafc)', s[:600], flags=re.I):
+        s = re.sub(r'(<svg\b[^>]*>)', r'\1<rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>', s, count=1)
+
+    # توحيد الأرقام في النصوص اللي على الرسم
+    table = _WESTERN_TO_INDIC if math_symbols == 'arabic' else _INDIC_TO_WESTERN
+    s = re.sub(r'(<text\b[^>]*>)([^<]*)(</text>)', lambda mm: mm.group(1) + mm.group(2).translate(table) + mm.group(3), s)
+    s = re.sub(r'(<tspan\b[^>]*>)([^<]*)(</tspan>)', lambda mm: mm.group(1) + mm.group(2).translate(table) + mm.group(3), s)
+
+    # التأكد إن الناتج XML سليم، وإلا نرمي الرسم بدل ما يظهر صورة بايظة
+    try:
+        import xml.etree.ElementTree as ET
+        ET.fromstring(s)
+    except Exception:
+        return None
+    return s
 
 # ============ Helper: حفظ/تحديث مجموعات الاختبار ============
 
@@ -531,7 +595,7 @@ def submit_exam(exam_id):
             return jsonify({'success': False, 'error': 'الاختبار غير موجود'}), 404
 
         exam = exam_res.data[0]
-        if not exam.get('is_published') or not student_can_access_content('exams', exam):
+        if getattr(request, 'user_role', None) == 'student' and (not exam.get('is_published') or not student_can_access_content('exams', exam)):
             return jsonify({'success': False, 'error': 'هذا المحتوى غير متاح لمجموعتك'}), 403
 
         questions_res = supabase.table('questions').select('*').eq('exam_id', exam_id).execute()
@@ -571,14 +635,15 @@ def submit_exam(exam_id):
             graded_by = 'pending'
 
             if q['question_type'] == 'mcq':
-                correct = q.get('correct_answer', '')
-                is_correct = str(student_answer) == str(correct)
+                # "١" و "1" نفس الإجابة (عشان تحويل الرموز للعربي ما يبوظش التصحيح)
+                correct = str(q.get('correct_answer', '') or '').translate(_INDIC_TO_WESTERN).strip()
+                is_correct = str(student_answer or '').translate(_INDIC_TO_WESTERN).strip() == correct
                 final_grade = q['points'] if is_correct else 0
                 auto_grade += final_grade
                 graded_by = 'auto'
             elif q['question_type'] == 'fill':
-                correct = (q.get('correct_answer') or '').strip().lower()
-                given = (student_answer or '').strip().lower()
+                correct = (q.get('correct_answer') or '').translate(_INDIC_TO_WESTERN).strip().lower()
+                given = (student_answer or '').translate(_INDIC_TO_WESTERN).strip().lower()
                 is_correct = correct == given
                 final_grade = q['points'] if is_correct else 0
                 auto_grade += final_grade
@@ -1116,8 +1181,7 @@ def _run_ai_grading(question_text, question_image_url, student_answer, student_a
             except Exception as e:
                 print(f"⚠️ فشل تحميل الصورة: {e}")
 
-    model = get_gemini_model()
-    response = model.generate_content(contents)
+    response = generate_with_fallback(contents)
 
     result_text = response.text.strip()
 
@@ -1241,6 +1305,8 @@ def generate_ai_quiz():
         difficulty = data.get('difficulty', 'medium')
         math_symbols = data.get('math_symbols', '').strip()
         grade_name = data.get('grade_name', '').strip()
+        # لازم نعرّف المادة قبل التحديد التلقائي (كانت بتتعرف بعده فتعمل خطأ)
+        subject_name = (data.get('subject_name') or 'رياضيات').strip()
         # ذكاء التحديد التلقائي لنمط الرموز إن لم يكن محدداً يدوياً
         if not math_symbols or math_symbols == 'auto':
             is_physics = 'فيزياء' in subject_name.lower() or 'physics' in subject_name.lower()
@@ -1252,7 +1318,6 @@ def generate_ai_quiz():
                 math_symbols = 'arabic'
             else:
                 math_symbols = 'arabic'
-        subject_name = data.get('subject_name', 'رياضيات').strip()
         question_format = data.get('question_format', 'mcq')  # 'mcq', 'essay', or 'mixed'
 
         # ملف مرفق (صورة أو PDF) يُقرأ في الذاكرة اللحظية فقط دون تخزين دائم
@@ -1291,7 +1356,7 @@ def generate_ai_quiz():
             context += f" تفاصيل وملاحظات إضافية: {video_description}."
 
         if math_symbols == 'arabic':
-            symbols_rule = """
+            symbols_rule = r"""
 قواعد صارمة وإلزامية للرموز والأرقام بالعربية (منهج الرياضيات للثانوية العامة المصرية):
 1. حظر تام للرموز الإنجليزية: ممنوع منعاً باتاً استخدام الحروف والرموز الإنجليزية داخل الأسئلة أو المعادلات أو الخيارات أو الشرح (ممنوع نهائياً x, y, z, e, i, sin, cos, tan, log, ln, dx, k, m, n).
 2. جدول تحويل الرموز الإجباري (حتى لو كان الملف المرفق أو المسألة الأصلية مكتوبة برموز إنجليزية، حوّلها فوراً وبلا استثناء إلى العربية):
@@ -1313,11 +1378,13 @@ def generate_ai_quiz():
    - ضع المعادلات بوضوح بين علامات $، واحرص على ألا تنعكس الإشارات أو الأقواس (مثال: $س + ص = ٥$ وليس $٥ = ص + س$).
 """
         else:
-            symbols_rule = """
+            symbols_rule = r"""
 قواعد صارمة: الرموز والأرقام بالإنجليزية (Standard English Math / Physics):
 1. للمرحلة الإعدادية ومادة الفيزياء: استخدم الرموز والأرقام الإنجليزية القياسية (x, y, z, f(x), i, e, \sin, \cos, \tan, \ln, \lim, dx, 1, 2, 3, 4, 5).
 2. لمادة الفيزياء: استخدم رموز الكميات الفيزيائية الإنجليزية المعتمدة (v, a, t, F, E, P, m, r, I, V, R) مع الوحدات العالمية.
 3. ضع التعبيرات الرياضية بدقة داخل صيغة LaTeX واضحة بين علامات $ مثل $f(x) = x^2 + 2x - 5$.
+4. حظر تام للرموز العربية داخل المعادلات والخيارات: ممنوع (س، ص، جا، جتا، ظا، لو، هـ، ء س) وممنوع الأرقام الهندية (٠١٢٣٤٥٦٧٨٩) نهائياً، حتى لو الملف المرفق مكتوب بالعربي — حوّلها للإنجليزية.
+5. نص السؤال نفسه يفضل بالعربي، لكن كل الأرقام والرموز والمتغيرات إنجليزية (مثال: "أوجد قيمة $x$ إذا كان $2x + 3 = 11$"). الكسر العشري بنقطة (0.5) مش فاصلة عربية.
 """
 
         diagram_guidelines = """
@@ -1460,8 +1527,7 @@ def generate_ai_quiz():
 
         content_items.append(prompt)
 
-        model = get_gemini_model()
-        response = model.generate_content(content_items if len(content_items) > 1 else prompt)
+        response = generate_with_fallback(content_items if len(content_items) > 1 else prompt)
         res_text = response.text.strip()
 
         if res_text.startswith('```json'):
@@ -1523,12 +1589,12 @@ def generate_ai_quiz():
             # تجهيز رسم الـ SVG وحفظه كـ data URI ليعمل في كافة أجزاء المنصة بسلاسة
             diagram_svg = q.get('diagram_svg')
             if diagram_svg and isinstance(diagram_svg, str) and '<svg' in diagram_svg:
-                clean_svg = diagram_svg.strip()
-                if 'xmlns=' not in clean_svg:
-                    clean_svg = clean_svg.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"')
-                q['diagram_svg'] = clean_svg
-                if not q.get('question_image_url'):
+                clean_svg = clean_ai_svg(diagram_svg, math_symbols)
+                q['diagram_svg'] = clean_svg  # None لو الرسم بايظ
+                if clean_svg and not q.get('question_image_url'):
                     q['question_image_url'] = f"data:image/svg+xml;utf8,{urllib.parse.quote(clean_svg)}"
+            else:
+                q['diagram_svg'] = None
 
         return jsonify({
             'success': True,
@@ -1537,9 +1603,19 @@ def generate_ai_quiz():
         })
     except Exception as e:
         print(f"AI Quiz Error: {e}")
+        msg = str(e)
+        # كل الموديلات مشغولة أو وصلنا للحد المجاني (5 طلبات في الدقيقة) — رسالة واضحة بدل النص الإنجليزي الطويل
+        if msg.startswith('AI_BUSY') or '429' in msg or '503' in msg or 'quota' in msg.lower():
+            wait = re.search(r'retry in ([\d.]+)s', msg)
+            secs = int(float(wait.group(1))) + 1 if wait else 60
+            return jsonify({
+                'success': False,
+                'error': f'خدمة الذكاء الاصطناعي مشغولة حالياً أو وصلت للحد المسموح في الدقيقة. استنى حوالي {secs} ثانية وجرب تاني.',
+                'retry_after': secs,
+            }), 503
         return jsonify({
             'success': False,
-            'error': f'فشل توليد الأسئلة: {str(e)}'
+            'error': f'فشل توليد الأسئلة: {msg[:300]}'
         }), 500
 
 
@@ -1549,11 +1625,19 @@ def generate_ai_quiz():
 @token_required
 def extract_questions_from_file():
     """
-    يستقبل ملف PDF أو صورة ويستخرج منه الأسئلة بالذكاء الاصطناعي.
-    كل سؤال يُرجع مع 4 اختيارات أ/ب/ج/د وإجابة مقترحة.
+    يستقبل ملف PDF أو صورة ويستخرج منه أسئلة الاختيار من متعدد بالذكاء الاصطناعي.
+    mode=image (الافتراضي): كل سؤال بيتقص كصورة من الملف زي ما هو (بيحافظ على العربي والرموز والرسومات)،
+                            والاختيارات بتبقى أ/ب/ج/د، والذكاء الاصطناعي بيحل السؤال ويختار الإجابة.
+    mode=text: الأسئلة بتتكتب كنص (الطريقة القديمة).
+    في الحالتين correct_answer = رقم الاختيار ("0","1",...) زي ما التصحيح متوقع.
     """
     try:
-        import base64, json as _json
+        import base64, json as _json, uuid
+        from concurrent.futures import ThreadPoolExecutor
+        try:
+            import pymupdf  # PyMuPDF
+        except ImportError:
+            return jsonify({'success': False, 'error': 'مكتبة PyMuPDF غير متاحة على السيرفر'}), 500
 
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'يرجى رفع ملف'}), 400
@@ -1561,114 +1645,186 @@ def extract_questions_from_file():
         uploaded_file = request.files['file']
         filename = uploaded_file.filename or ''
         file_bytes = uploaded_file.read()
-        points_per_q = int(request.form.get('points', 2))
+        try:
+            points_per_q = int(request.form.get('points', 2) or 2)
+        except ValueError:
+            points_per_q = 2
+        mode = (request.form.get('mode') or 'image').strip()
         file_ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
 
-        pages_b64 = []  # قائمة صور base64 PNG لكل صفحة
-
+        IMAGE_EXTS = {'jpg': 'jpeg', 'jpeg': 'jpeg', 'png': 'png', 'webp': 'webp', 'bmp': 'bmp', 'gif': 'gif'}
         if file_ext == 'pdf':
-            try:
-                import pymupdf  # PyMuPDF >= 1.24
-                doc = pymupdf.open(stream=file_bytes, filetype='pdf')
-                for page in doc:
-                    mat = pymupdf.Matrix(2.0, 2.0)
-                    pix = page.get_pixmap(matrix=mat)
-                    pages_b64.append(base64.b64encode(pix.tobytes('png')).decode())
-                doc.close()
-            except ImportError:
-                return jsonify({'success': False, 'error': 'مكتبة PyMuPDF غير متاحة'}), 500
-        elif file_ext in ('jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'):
-            pages_b64.append(base64.b64encode(file_bytes).decode())
+            doc = pymupdf.open(stream=file_bytes, filetype='pdf')
+        elif file_ext in IMAGE_EXTS:
+            # PyMuPDF بيفتح الصور كمستند من صفحة واحدة، فنقدر نقص منها بنفس الطريقة
+            doc = pymupdf.open(stream=file_bytes, filetype=IMAGE_EXTS[file_ext])
+            if not doc.is_pdf:
+                doc = pymupdf.open('pdf', doc.convert_to_pdf())
         else:
             return jsonify({'success': False, 'error': 'صيغة الملف غير مدعومة. استخدم PDF أو JPG أو PNG'}), 400
 
-        if not pages_b64:
+        MAX_PAGES = 12
+        if doc.page_count == 0:
             return jsonify({'success': False, 'error': 'الملف فارغ أو لا يحتوي صفحات'}), 400
+        if doc.page_count > MAX_PAGES:
+            return jsonify({'success': False, 'error': f'الملف فيه {doc.page_count} صفحة. الحد الأقصى {MAX_PAGES} صفحة في المرة — قسّمه لأكتر من ملف.'}), 400
 
-        # -- إرسال جميع الصفحات لـ Gemini Vision --
+        # -- صور الصفحات للذكاء الاصطناعي --
         content_parts = []
-        for b64 in pages_b64:
-            content_parts.append({
-                'inline_data': {'mime_type': 'image/png', 'data': b64}
-            })
+        for page in doc:
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(1.6, 1.6))
+            content_parts.append({'inline_data': {'mime_type': 'image/png', 'data': base64.b64encode(pix.tobytes('png')).decode()}})
 
-        ai_prompt = (
-            "أنت نظام ذكاء اصطناعي متخصص في استخراج أسئلة الاختبارات من صور الورق.\n\n"
-            "مهمتك: استخرج كل سؤال اختيار من متعدد من الصور وأعد إجابة JSON بالتنسيق:\n"
-            "[\n"
-            "  {\n"
-            "    \"question_text\": \"نص السؤال كاملاً\",\n"
-            "    \"options\": [\"نص الاختيار الأول\", \"نص الثاني\", \"نص الثالث\", \"نص الرابع\"],\n"
-            "    \"correct_index\": 0\n"
-            "  }\n"
-            "]\n\n"
-            "القواعد الصارمة:\n"
-            "1. أعد فقط مصفوفة JSON بدون أي نص إضافي أو markdown\n"
-            "2. اكتب نص السؤال والاختيارات كما هو مكتوب في الورقة بدون تعديل\n"
-            "3. correct_index رقم من 0 إلى 3 (0=الأول، 1=الثاني، 2=الثالث، 3=الرابع). إذا لم تعرف اكتب 0\n"
-            "4. أدرج نص الاختيار بدون الحرف/الرقم الذي يسبقه (أ/ب/ج/د أو 1/2/3/4 أو a/b/c/d)\n"
-            "5. استخرج جميع الأسئلة من جميع الصفحات بالترتيب\n"
-            "6. المعادلات الرياضية اكتبها بـ LaTeX داخل علامة $ مثل: $x^2 + y^2 = r^2$"
-        )
+        if mode == 'image':
+            ai_prompt = (
+                "أنت نظام متخصص في تحليل أوراق الامتحانات المصورة.\n"
+                f"الصور المرفقة هي {doc.page_count} صفحة من امتحان بالترتيب (أول صورة = الصفحة 1).\n\n"
+                "مهمتك: لكل سؤال اختيار من متعدد في الصفحات:\n"
+                "1. حدّد مكانه بدقة: page (رقم الصفحة يبدأ من 1) و box_2d = [ymin, xmin, ymax, xmax] بقيم من 0 إلى 1000 نسبةً لأبعاد الصفحة.\n"
+                "   الصندوق لازم يشمل كل حاجة تخص السؤال: رقمه + نصه + أي رسم أو جدول أو شكل تابع له + كل الاختيارات.\n"
+                "   وما يشملش أي جزء من سؤال تاني. خلّي الصندوق واسع شوية بدل ما يقص كلام.\n"
+                "2. options_count: عدد الاختيارات المكتوبة في السؤال (من 2 إلى 5).\n"
+                "3. حل السؤال بنفسك بدقة خطوة بخطوة، واختار correct_index (0 = أول اختيار، 1 = التاني، ...).\n"
+                "4. question_text: نص السؤال مختصر (للمرجعية فقط).\n"
+                "5. confidence: رقم من 0 إلى 1 يعبر عن ثقتك في الإجابة.\n\n"
+                "تجاهل العناوين والتعليمات وبيانات الطالب والأسئلة المقالية.\n"
+                "رتّب الأسئلة بنفس ترتيبها في الورقة.\n"
+                "أعد مصفوفة JSON فقط بدون أي نص أو markdown، بالشكل ده:\n"
+                '[{"page": 1, "box_2d": [120, 40, 330, 960], "options_count": 4, "correct_index": 2, "question_text": "...", "confidence": 0.9}]'
+            )
+        else:
+            ai_prompt = (
+                "أنت نظام ذكاء اصطناعي متخصص في استخراج أسئلة الاختبارات من صور الورق.\n\n"
+                "مهمتك: استخرج كل سؤال اختيار من متعدد من الصور وأعد إجابة JSON بالتنسيق:\n"
+                '[{"question_text": "نص السؤال كاملاً", "options": ["الاختيار الأول", "التاني", "التالت", "الرابع"], "correct_index": 0}]\n\n'
+                "القواعد الصارمة:\n"
+                "1. أعد فقط مصفوفة JSON بدون أي نص إضافي أو markdown\n"
+                "2. اكتب نص السؤال والاختيارات كما هو مكتوب في الورقة بدون تعديل\n"
+                "3. حل السؤال واختار correct_index (0=الأول، 1=الثاني، ...)\n"
+                "4. أدرج نص الاختيار بدون الحرف/الرقم الذي يسبقه (أ/ب/ج/د أو 1/2/3/4 أو a/b/c/d)\n"
+                "5. استخرج جميع الأسئلة من جميع الصفحات بالترتيب\n"
+                "6. المعادلات الرياضية اكتبها بـ LaTeX داخل علامة $ مثل: $x^2 + y^2 = r^2$"
+            )
         content_parts.append(ai_prompt)
 
-        model = get_gemini_model()
-        response = model.generate_content(content_parts)
-        raw = response.text.strip()
-
-        # تنظيف markdown
+        # وقت أقل من التوليد العادي عشان يفضل وقت للقص والرفع قبل timeout بتاع السيرفر (120 ثانية)
+        response = generate_with_fallback(content_parts, total_budget=80, per_try=70)
+        raw = (response.text or '').strip()
         raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
-        raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE)
-        raw = raw.strip()
-
+        raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE).strip()
         try:
             questions_data = _json.loads(raw)
         except Exception:
             m = re.search(r'\[.*\]', raw, re.DOTALL)
-            if m:
-                questions_data = _json.loads(m.group())
-            else:
-                return jsonify({'success': False, 'error': f'تعذر تحليل رد الذكاء الاصطناعي: {raw[:400]}'}), 500
+            if not m:
+                return jsonify({'success': False, 'error': 'تعذر فهم رد الذكاء الاصطناعي. جرّب تاني.'}), 500
+            questions_data = _json.loads(m.group())
+        if not isinstance(questions_data, list) or not questions_data:
+            return jsonify({'success': False, 'error': 'ما لقيتش أسئلة اختيار من متعدد في الملف.'}), 400
 
-        ARABIC_LABELS = ['أ', 'ب', 'ج', 'د']
+        ARABIC_LABELS = ['أ', 'ب', 'ج', 'د', 'هـ']
         result_questions = []
 
-        for q in questions_data:
-            opts = list(q.get('options') or [])
-            while len(opts) < 4:
-                opts.append('')
+        if mode == 'image':
+            tenant_id, _ = get_current_tenant_id()
+            folder = f"imports/{tenant_id or 'general'}/{uuid.uuid4().hex[:8]}"
+            crops = []  # (index_in_result, png_bytes)
+            for q in questions_data:
+                try:
+                    p = int(q.get('page', 1)) - 1
+                    ymin, xmin, ymax, xmax = [float(v) for v in q.get('box_2d', [])[:4]]
+                except Exception:
+                    continue
+                if not (0 <= p < doc.page_count) or ymax <= ymin or xmax <= xmin:
+                    continue
+                page = doc[p]
+                pr = page.rect
+                w, h = pr.width, pr.height
+                pad_x, pad_y = w * 0.02, h * 0.005  # هامش صغير فوق وتحت عشان ما يدخلش جزء من السؤال اللي بعده
+                rect = pymupdf.Rect(
+                    max(pr.x0, pr.x0 + xmin / 1000 * w - pad_x),
+                    max(pr.y0, pr.y0 + ymin / 1000 * h - pad_y),
+                    min(pr.x1, pr.x0 + xmax / 1000 * w + pad_x),
+                    min(pr.y1, pr.y0 + ymax / 1000 * h + pad_y),
+                )
+                if rect.is_empty or rect.height < 8:
+                    continue
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2.5, 2.5), clip=rect)
 
-            correct_idx = int(q.get('correct_index', 0))
-            if not (0 <= correct_idx <= 3):
-                correct_idx = 0
+                n_opts = q.get('options_count') or 4
+                try:
+                    n_opts = max(2, min(5, int(n_opts)))
+                except ValueError:
+                    n_opts = 4
+                try:
+                    correct_idx = int(q.get('correct_index', 0))
+                except ValueError:
+                    correct_idx = 0
+                if not (0 <= correct_idx < n_opts):
+                    correct_idx = 0
 
-            # الاختيارات بصيغة "أ - نص"
-            formatted_options = [
-                f"{ARABIC_LABELS[i]} - {opts[i]}" if opts[i] else ARABIC_LABELS[i]
-                for i in range(4)
-            ]
+                result_questions.append({
+                    'question_text': '',
+                    'question_type': 'mcq',
+                    'options': ARABIC_LABELS[:n_opts],
+                    'correct_answer': str(correct_idx),
+                    'points': points_per_q,
+                    'question_image_url': '',
+                    'correct_answer_image_url': '',
+                    'ai_reference_text': (q.get('question_text') or '')[:300],
+                    'ai_confidence': q.get('confidence'),
+                })
+                crops.append((len(result_questions) - 1, pix.tobytes('png')))
 
-            result_questions.append({
-                'question_text': q.get('question_text', ''),
-                'question_type': 'mcq',
-                'options': formatted_options,
-                'correct_answer': ARABIC_LABELS[correct_idx],
-                'points': points_per_q,
-                'question_image_url': '',
-                'correct_answer_image_url': '',
-            })
+            def _upload(item):
+                idx, png = item
+                path = f"{folder}/q{idx + 1:02d}.png"
+                supabase.storage.from_('exam-images').upload(path, png, file_options={'content-type': 'image/png'})
+                return idx, supabase.storage.from_('exam-images').get_public_url(path)
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for idx, url in pool.map(_upload, crops):
+                    result_questions[idx]['question_image_url'] = url
+
+            result_questions = [q for q in result_questions if q['question_image_url']]
+            if not result_questions:
+                return jsonify({'success': False, 'error': 'الذكاء الاصطناعي ما قدرش يحدد أماكن الأسئلة في الملف. جرّب وضع "نص" أو ملف أوضح.'}), 400
+        else:
+            for q in questions_data:
+                opts = [o for o in list(q.get('options') or []) if str(o).strip()][:5]
+                while len(opts) < 2:
+                    opts.append('')
+                try:
+                    correct_idx = int(q.get('correct_index', 0))
+                except ValueError:
+                    correct_idx = 0
+                if not (0 <= correct_idx < len(opts)):
+                    correct_idx = 0
+                result_questions.append({
+                    'question_text': q.get('question_text', ''),
+                    'question_type': 'mcq',
+                    'options': [f"{ARABIC_LABELS[i]} - {opts[i]}" if opts[i] else ARABIC_LABELS[i] for i in range(len(opts))],
+                    'correct_answer': str(correct_idx),
+                    'points': points_per_q,
+                    'question_image_url': '',
+                    'correct_answer_image_url': '',
+                })
 
         return jsonify({
             'success': True,
             'count': len(result_questions),
             'questions': result_questions,
-            'pages_processed': len(pages_b64)
+            'pages_processed': doc.page_count,
+            'mode': mode,
         })
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': f'خطأ أثناء الاستخراج: {str(e)}'}), 500
+        msg = str(e)
+        if msg.startswith('AI_BUSY') or '429' in msg or '503' in msg:
+            return jsonify({'success': False, 'error': 'خدمة الذكاء الاصطناعي مشغولة حالياً. استنى دقيقة وجرب تاني.'}), 503
+        return jsonify({'success': False, 'error': f'خطأ أثناء الاستخراج: {msg[:300]}'}), 500
 
 
 # ============ AI Math Homework Hint Assistant ============
@@ -1702,8 +1858,7 @@ def get_math_homework_hint():
 
 أجب باللغة العربية مباشرة وبدون أي مقدمات طويلة."""
 
-        model = get_gemini_model()
-        response = model.generate_content(prompt)
+        response = generate_with_fallback(prompt)
         hint_text = response.text.strip()
 
         return jsonify({
