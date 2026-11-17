@@ -66,14 +66,106 @@ def token_required(f):
         except jwt.InvalidTokenError:
             return jsonify({'success': False, 'error': 'Invalid token'}), 401
 
+        if not _role_allowed(request.user_role):
+            return jsonify({'success': False, 'error': 'غير مصرح لهذا الدور'}), 403
+
         return f(*args, **kwargs)
     return decorated
 
 
+# ============ Role Policy ============
+# المدرس والسوبر أدمن: كل الـ endpoints (والـ admin routes ليها فحص إضافي خاص بيها).
+# باقي الأدوار: بس الـ endpoints اللي صفحاتهم في الفرونت إند بتستخدمها فعلاً.
+# لو أضفت صفحة جديدة لطالب/ولي أمر/مساعد، ضيف الـ endpoint بتاعها هنا.
+
+FULL_ACCESS_ROLES = {'teacher', 'super_admin', 'superadmin'}
+
+COMMON_ENDPOINTS = {
+    ('POST', '/api/auth/logout'),
+    ('GET', '/api/auth/me'),
+    ('GET', '/api/honor/leaderboard'),
+    ('GET', '/api/honor/notifications'),
+    ('POST', '/api/honor/notifications/mark-read'),
+}
+
+ROLE_ENDPOINTS = {
+    'student': {
+        ('GET', '/api/attendance'),
+        ('GET', '/api/grades'),
+        ('GET', '/api/groups'),
+        ('GET', '/api/subjects'),
+        ('GET', '/api/subjects/<int:subject_id>'),
+        ('GET', '/api/branches'),
+        ('GET', '/api/categories'),
+        ('GET', '/api/documents/<int:doc_id>'),
+        ('GET', '/api/student/documents'),
+        ('GET', '/api/student/exams'),
+        ('GET', '/api/student/my-subjects'),
+        ('GET', '/api/student/videos'),
+        ('GET', '/api/exams/<int:exam_id>/take'),
+        ('POST', '/api/exams/<int:exam_id>/submit'),
+        ('GET', '/api/exams/<int:exam_id>/receipt'),
+        ('GET', '/api/exams/<int:exam_id>/my-result'),
+        ('POST', '/api/videos/<int:video_id>/view'),
+        ('POST', '/api/videos/<int:video_id>/unlock'),
+        ('POST', '/api/upload/image'),
+        ('GET', '/api/honor/my-rank'),
+        ('GET', '/api/live/session'),
+        ('GET', '/api/live/messages'),
+        ('POST', '/api/live/messages'),
+        ('POST', '/api/live/attendance'),
+        ('GET', '/api/live/quiz'),
+        ('POST', '/api/live/quiz/answer'),
+    },
+    'parent': {
+        ('GET', '/api/auth/parent/child'),
+        ('GET', '/api/honor/my-rank'),
+    },
+    'assistant': {
+        ('GET', '/api/students'),
+        ('GET', '/api/students/activity-tracker'),
+        ('GET', '/api/groups'),
+        ('GET', '/api/groups/<int:group_id>/students'),
+        ('GET', '/api/subjects'),
+        ('GET', '/api/attendance/group/<int:group_id>/today'),
+        ('POST', '/api/attendance/check-in'),
+        ('POST', '/api/honor/points/add'),
+        ('GET', '/api/live/session'),
+        ('GET', '/api/live/messages'),
+        ('POST', '/api/live/messages'),
+        ('POST', '/api/live/attendance'),
+        ('GET', '/api/live/quiz'),
+        ('POST', '/api/live/quiz/answer'),
+    },
+}
+
+
+def _role_allowed(role) -> bool:
+    if role in FULL_ACCESS_ROLES:
+        return True
+    rule = request.url_rule.rule if request.url_rule else None
+    key = (request.method, rule)
+    return key in COMMON_ENDPOINTS or key in ROLE_ENDPOINTS.get(role, set())
+
+
 # ============ Multi-tenancy Helpers ============
+
+def is_student_token() -> bool:
+    """توكن الطالب فيه id من جدول students مش users — لازم ما يتدورش عليه في users"""
+    return getattr(request, 'user_role', None) == 'student'
+
 
 def get_current_tenant_id():
     try:
+        if is_student_token():
+            student_res = supabase.table('students')\
+                .select('tenant_id')\
+                .eq('id', request.user_id)\
+                .execute()
+            if not student_res.data:
+                return None, None
+            return student_res.data[0].get('tenant_id'), 'student'
+
         user_res = supabase.table('users')\
             .select('tenant_id, role')\
             .eq('id', request.user_id)\
@@ -108,7 +200,18 @@ def get_tenant_for_insert():
 
 def is_super_admin():
     _, role = get_current_tenant_id()
-    return role == 'super_admin'
+    return role in ('super_admin', 'superadmin')
+
+
+def get_staff_user():
+    """يرجّع صف المستخدم (users) لصاحب التوكن، أو None لو التوكن لطالب أو المستخدم مش موجود"""
+    if is_student_token():
+        return None
+    try:
+        res = supabase.table('users').select('*').eq('id', request.user_id).execute()
+        return res.data[0] if res.data else None
+    except Exception:
+        return None
 
 
 def check_tenant_ownership(record: dict) -> bool:

@@ -21,6 +21,9 @@ def get_attendance():
     try:
         query = supabase.table('attendance').select('*')
         query = apply_tenant_filter(query)
+        # الطالب يشوف سجلاته هو بس
+        if getattr(request, 'user_role', None) == 'student':
+            query = query.eq('student_id', request.user_id)
         response = query.execute()
 
         return jsonify({

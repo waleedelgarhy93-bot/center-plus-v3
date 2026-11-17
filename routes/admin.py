@@ -3,13 +3,15 @@ from flask import Blueprint, jsonify, request
 from datetime import datetime, timedelta
 
 from db import supabase
-from helpers import token_required, hash_password, verify_password
+from helpers import token_required, hash_password, verify_password, is_student_token
 
 admin_bp = Blueprint('admin', __name__)
 
 
 def _require_super_admin():
     """التحقق من أن المستخدم الحالي super_admin"""
+    if is_student_token():
+        return False, (jsonify({'success': False, 'error': 'غير مصرح'}), 403)
     try:
         user_res = supabase.table('users').select('role').eq('id', request.user_id).execute()
         if not user_res.data or user_res.data[0].get('role') not in ['super_admin', 'superadmin']:

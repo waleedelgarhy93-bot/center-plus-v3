@@ -11,6 +11,8 @@ from helpers import (
     create_token,
     token_required,
     get_current_tenant_id,
+    get_staff_user,
+    is_student_token,
 )
 
 auth_bp = Blueprint('auth', __name__)
@@ -138,9 +140,14 @@ def _check_and_save_session(user_id, user_type, user_role, tenant_id, device_id)
 # ============ Login / Register ============
 
 @auth_bp.route('/api/auth/register', methods=['POST', 'OPTIONS'])
+@token_required
 def register():
+    """إنشاء مستخدم بأي دور — مسموح للسوبر أدمن فقط"""
     if request.method == 'OPTIONS':
         return '', 200
+    caller = get_staff_user()
+    if not caller or caller.get('role') not in ('super_admin', 'superadmin'):
+        return jsonify({'success': False, 'error': 'غير مصرح'}), 403
     try:
         data = request.get_json() or {}
         username = data.get('username')
@@ -273,6 +280,8 @@ def me():
     if request.method == 'OPTIONS':
         return '', 200
     try:
+        if is_student_token():
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
         user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
         if not user_res.data:
             return jsonify({'success': False, 'error': 'User not found'}), 404
@@ -451,6 +460,8 @@ def get_parent_child():
     if request.method == 'OPTIONS':
         return '', 200
     try:
+        if is_student_token():
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
         user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
         if not user_res.data:
             return jsonify({'success': False, 'error': 'المستخدم غير موجود'}), 404
@@ -498,6 +509,9 @@ def get_parent_child():
 def register_assistant():
     if request.method == 'OPTIONS':
         return '', 200
+    caller = get_staff_user()
+    if not caller or caller.get('role') not in ('teacher', 'super_admin', 'superadmin'):
+        return jsonify({'success': False, 'error': 'غير مصرح'}), 403
     try:
         data = request.get_json() or {}
         username = data.get('username')
@@ -537,40 +551,6 @@ def register_assistant():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============ DEV ONLY: Reset Password ============
-
-@auth_bp.route('/api/auth/dev-reset-password', methods=['POST', 'OPTIONS'])
-def dev_reset_password():
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        data = request.get_json() or {}
-        username = data.get('username')
-        new_password = data.get('new_password', 'admin123')
-
-        if not username:
-            return jsonify({'success': False, 'error': 'username مطلوب'}), 400
-
-        user_res = supabase.table('users').select('id, username').eq('username', username).execute()
-        if not user_res.data:
-            return jsonify({'success': False, 'error': 'المستخدم غير موجود'}), 404
-
-        user = user_res.data[0]
-
-        supabase.table('users').update({
-            'password': hash_password(new_password)
-        }).eq('id', user['id']).execute()
-
-        return jsonify({
-            'success': True,
-            'message': f'تم تحديث الباسورد لـ {username}',
-            'username': username,
-            'new_password': new_password
-        })
-
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
 # ============ Teacher / Center Settings ============
 
 @auth_bp.route('/api/teacher/settings', methods=['GET', 'PUT', 'OPTIONS'])
@@ -579,6 +559,8 @@ def teacher_settings():
     if request.method == 'OPTIONS':
         return '', 200
     try:
+        if is_student_token():
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
         user_res = supabase.table('users').select('*').eq('id', request.user_id).execute()
         if not user_res.data:
             return jsonify({'success': False, 'error': 'المستخدم غير موجود'}), 404

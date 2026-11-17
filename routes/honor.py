@@ -167,7 +167,17 @@ def get_leaderboard():
 def get_my_rank():
     """ترتيب الطالب الحالي"""
     try:
-        student_id = request.user_id
+        role = getattr(request, 'user_role', None)
+        if role == 'student':
+            student_id = request.user_id
+        elif role == 'parent':
+            # توكن ولي الأمر فيه id من جدول users — الطالب المربوط بيه في users.student_id
+            parent_res = supabase.table('users').select('role, student_id').eq('id', request.user_id).execute()
+            if not parent_res.data or parent_res.data[0].get('role') != 'parent' or not parent_res.data[0].get('student_id'):
+                return jsonify({'success': False, 'error': 'حسابك غير مربوط بطالب'}), 404
+            student_id = parent_res.data[0]['student_id']
+        else:
+            return jsonify({'success': False, 'error': 'متاح للطالب وولي الأمر فقط'}), 403
 
         student_res = supabase.table('students').select('*').eq('id', student_id).execute()
         if not student_res.data:
@@ -251,7 +261,7 @@ def get_notifications():
         notifications = query.execute().data or []
 
         # إذا كان المستخدم طالباً، عرض الإشعارات العامة أو الخاصة به
-        if getattr(request, 'role', '') == 'student':
+        if getattr(request, 'user_role', '') == 'student':
             student_id = getattr(request, 'user_id', None)
             notifications = [n for n in notifications if not n.get('student_id') or n.get('student_id') == student_id]
 
