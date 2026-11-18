@@ -154,6 +154,7 @@ def create_document():
             'file_url': file_url,
             'subject_id': data.get('subject_id'),
             'category_id': int(data['category_id']) if data.get('category_id') else None,
+            'branch_id': int(data['branch_id']) if data.get('branch_id') else None,
             'group_id': group_ids[0] if group_ids else None,
             'teacher_id': request.user_id,
             'tenant_id': tenant_id,
@@ -222,9 +223,11 @@ def update_document(doc_id):
 
         data = request.get_json() or {}
         update_data = {}
-        for field in ['title', 'subject_id', 'category_id']:
+        for field in ['title', 'subject_id', 'category_id', 'branch_id']:
             if field in data:
                 update_data[field] = data[field]
+        if 'branch_id' in update_data:
+            update_data['branch_id'] = int(update_data['branch_id']) if update_data['branch_id'] else None
 
         # Handle allow_download in description
         if 'allow_download' in data or 'description' in data:

@@ -8,9 +8,30 @@ from helpers import (
     check_tenant_ownership,
     get_student_access,
     student_matches_grade_subject,
+    normalize_grade,
 )
 
 categories_bp = Blueprint('categories', __name__)
+
+
+def grade_key(grade):
+    """مفتاح موحّد للصف: "تالتة ثانوي" و "الثالث الثانوي" نفس الصف،
+    أما "الأول الثانوي (الصف العاشر)" صف مختلف (منهج تاني)."""
+    g = (grade or '').strip()
+    n = normalize_grade(g)
+    if not n:
+        return ('raw', g)
+    return (n[0], n[1], '(' in g)
+
+
+_STAGE_ORDER = {'pri': 0, 'prep': 1, 'sec': 2}
+
+
+def grade_sort_value(grade):
+    k = grade_key(grade)
+    if k[0] == 'raw':
+        return 999
+    return _STAGE_ORDER.get(k[0], 9) * 100 + k[1] * 10 + (5 if k[2] else 0)
 
 
 # ===================== CATEGORIES (القديمة للتوافق) =====================
@@ -111,13 +132,16 @@ def get_branches_alias():
         query = supabase.table('branches').select('*').order('sort_order').order('created_at')
         query = apply_tenant_filter(query)
 
-        if grade:
-            query = query.eq('grade', grade)
         if subject_id:
             query = query.eq('subject_id', subject_id)
 
         res = query.execute()
         branches = res.data or []
+
+        # فلتر الصف بالمعنى مش بالنص ("تالتة ثانوي" = "الثالث الثانوي")
+        if grade:
+            wanted = grade_key(grade)
+            branches = [b for b in branches if grade_key(b.get('grade')) == wanted]
 
         # الطالب: بس فروع/تصنيفات مادته وصفه
         if getattr(request, 'user_role', None) == 'student':
@@ -140,52 +164,78 @@ def get_branches_alias():
 @categories_bp.route('/api/branches/grades-overview', methods=['GET'])
 @token_required
 def get_grades_overview_alias():
+    """الصفوف الدراسية: نفس الصفوف والمواد اللي في صفحات الفيديوهات/الاختبارات/الواجبات/المذكرات.
+    - الصفوف من مجموعات السنتر (بنفس أسمائها) + أي صف عنده وحدات بس.
+    - "تالتة ثانوي" و "الثالث الثانوي" صف واحد.
+    - لكل وحدة: عدد المحتوى اللي جواها (فيديوهات/اختبارات/واجبات/مذكرات)."""
     try:
-        query = supabase.table('branches').select('*').order('grade').order('sort_order')
-        query = apply_tenant_filter(query)
-        res = query.execute()
-        all_branches = res.data or []
+        groups = apply_tenant_filter(supabase.table('groups').select('grade, subject_id')).execute().data or []
+        all_branches = apply_tenant_filter(
+            supabase.table('branches').select('*').order('sort_order').order('created_at')
+        ).execute().data or []
+        subs_map = {
+            s['id']: s
+            for s in (apply_tenant_filter(supabase.table('subjects').select('id, name, color, icon')).execute().data or [])
+        }
 
-        subs_res = supabase.table('subjects').select('id, name, color, icon')
-        subs_res = apply_tenant_filter(subs_res)
-        subs_map = {s['id']: s for s in (subs_res.execute().data or [])}
+        # عدد المحتوى في كل وحدة
+        branch_ids = [b['id'] for b in all_branches]
+        counts = {bid: {'videos': 0, 'exams': 0, 'homework': 0, 'documents': 0} for bid in branch_ids}
+        if branch_ids:
+            for v in supabase.table('videos').select('branch_id').in_('branch_id', branch_ids).execute().data or []:
+                counts[v['branch_id']]['videos'] += 1
+            for e in supabase.table('exams').select('branch_id, exam_type').in_('branch_id', branch_ids).execute().data or []:
+                counts[e['branch_id']]['homework' if e.get('exam_type') == 'homework' else 'exams'] += 1
+            for d in supabase.table('documents').select('branch_id').in_('branch_id', branch_ids).execute().data or []:
+                counts[d['branch_id']]['documents'] += 1
 
-        grade_map = {}
-        for b in all_branches:
-            grade = b.get('grade', '')
-            sid = b.get('subject_id')
-            if grade not in grade_map:
-                grade_map[grade] = {}
-            if sid not in grade_map[grade]:
-                grade_map[grade][sid] = {
+        grades = {}  # key -> {'label', 'subjects': {sid: {...}}}
+
+        def ensure_grade(label):
+            k = grade_key(label)
+            if k not in grades:
+                grades[k] = {'label': (label or '').strip(), 'subjects': {}}
+            return grades[k]
+
+        def ensure_subject(entry, sid):
+            if sid not in entry['subjects']:
+                s = subs_map.get(sid, {})
+                entry['subjects'][sid] = {
                     'subject_id': sid,
-                    'subject_name': subs_map.get(sid, {}).get('name', ''),
-                    'subject_color': subs_map.get(sid, {}).get('color', 'blue'),
+                    'subject_name': (s.get('name') or '').strip(),
+                    'subject_color': s.get('color') or 'blue',
                     'branches_count': 0,
-                    'branches': []
+                    'content_count': 0,
+                    'branches': [],
                 }
-            grade_map[grade][sid]['branches_count'] += 1
-            grade_map[grade][sid]['branches'].append({
+            return entry['subjects'][sid]
+
+        # الصفوف والمواد من المجموعات أولاً (عشان الاسم يبقى نفس اسم المجموعة)
+        for g in groups:
+            if (g.get('grade') or '').strip():
+                entry = ensure_grade(g['grade'])
+                if g.get('subject_id'):
+                    ensure_subject(entry, g['subject_id'])
+
+        for b in all_branches:
+            entry = ensure_grade(b.get('grade'))
+            sub = ensure_subject(entry, b.get('subject_id'))
+            c = counts.get(b['id'], {})
+            total = sum(c.values())
+            sub['branches_count'] += 1
+            sub['content_count'] += total
+            sub['branches'].append({
                 'id': b['id'],
                 'name': b['name'],
-                'sort_order': b.get('sort_order', 0)
+                'sort_order': b.get('sort_order', 0),
+                'counts': c,
+                'content_count': total,
             })
 
-        GRADE_ORDER = [
-            'أولى إعدادي', 'تانية إعدادي', 'تالتة إعدادي',
-            'أولى ثانوي', 'تانية ثانوي', 'تالتة ثانوي'
-        ]
         result = []
-        for grade in GRADE_ORDER:
-            if grade in grade_map:
-                subjects = list(grade_map[grade].values())
-                subjects.sort(key=lambda x: x.get('subject_name') or '')
-                result.append({'grade': grade, 'subjects': subjects})
-
-        for grade, subjects_dict in grade_map.items():
-            if grade not in GRADE_ORDER:
-                subjects = list(subjects_dict.values())
-                result.append({'grade': grade, 'subjects': subjects})
+        for entry in sorted(grades.values(), key=lambda e: (grade_sort_value(e['label']), e['label'])):
+            subjects = sorted(entry['subjects'].values(), key=lambda x: x.get('subject_name') or '')
+            result.append({'grade': entry['label'], 'subjects': subjects})
 
         return jsonify({'success': True, 'grades': result})
     except Exception as e:
@@ -282,6 +332,8 @@ def get_branch_content_alias(branch_id):
             return jsonify({'success': False, 'error': 'الفرع غير موجود'}), 404
 
         branch = branch_res.data[0]
+        if not check_tenant_ownership(branch):
+            return jsonify({'success': False, 'error': 'غير مصرح'}), 403
 
         videos_res = supabase.table('videos').select('id, title, description, video_url, created_at').eq('branch_id', branch_id).execute()
         exams_res = supabase.table('exams').select('id, title, description, created_at, max_grade').eq('branch_id', branch_id).neq('exam_type', 'homework').execute()
