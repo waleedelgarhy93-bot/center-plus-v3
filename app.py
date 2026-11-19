@@ -24,8 +24,19 @@ CORS(
     }},
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    expose_headers=["X-Refreshed-Token"],
     supports_credentials=True,
 )
+
+
+# تجديد التوكن قبل ما يخلص (token_required بيحط التوكن الجديد في g.refreshed_token)
+@app.after_request
+def attach_refreshed_token(response):
+    from flask import g
+    new_token = g.pop('refreshed_token', None)
+    if new_token:
+        response.headers['X-Refreshed-Token'] = new_token
+    return response
 
 # دعم الرد على OPTIONS عالمياً
 @app.before_request

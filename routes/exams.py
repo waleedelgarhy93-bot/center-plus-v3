@@ -1292,6 +1292,62 @@ def _enforce_arabic_symbols(questions):
             q['model_answer'] = sanitize_str(q['model_answer'])
     return questions
 
+# شرطة LaTeX مفردة قبل أمر (\frac, \sqrt, \times, \theta ...) لازم تتضاعف قبل json.loads:
+# \f و \t و \b و \n و \r هروب JSON صحيح فكانت بتتحول بصمت لـ form-feed/tab وتبوّظ المعادلة،
+# و \s أو \l هروب غلط فكان json.loads بيقع بـ "Invalid \escape".
+# (?<!\\)((?:\\\\)*) = عدد زوجي من الشرطات قبلها، يعني الشرطة دي مش متهربة أصلاً.
+_LATEX_CMD_RE = re.compile(r'(?<!\\)((?:\\\\)*)\\(?!u[0-9a-fA-F]{4})(?=[a-zA-Z]{2,})')
+_BAD_ESCAPE_RE = re.compile(r'(?<!\\)((?:\\\\)*)\\(?!["\\/bfnrtu])')
+
+
+def _parse_ai_json_array(raw_text):
+    """يقرأ مصفوفة أسئلة JSON من رد الذكاء الاصطناعي مع حماية معادلات LaTeX والعربي.
+    لو الرد اتقطع في النص (حد التوكنز) بيرجّع الأسئلة الكاملة اللي قبل القطع."""
+    text = (raw_text or '').strip()
+    if text.startswith('```'):
+        text = re.sub(r'^```[a-zA-Z]*\s*', '', text)
+    if text.endswith('```'):
+        text = text[:-3]
+    text = text.strip()
+    start = text.find('[')
+    if start > 0:
+        text = text[start:]
+    end = text.rfind(']')
+    if end != -1:
+        text = text[:end + 1]
+
+    fixed = _LATEX_CMD_RE.sub(lambda m: m.group(1) + '\\\\', text)
+    fixed = _BAD_ESCAPE_RE.sub(lambda m: m.group(1) + '\\\\', fixed)
+
+    def _as_list(val):
+        if isinstance(val, dict):
+            val = val.get('questions', [val])
+        return [q for q in val if isinstance(q, dict)] if isinstance(val, list) else None
+
+    first_error = None
+    try:
+        return _as_list(json.loads(fixed, strict=False))
+    except ValueError as e:
+        first_error = e
+
+    # الرد مقطوع: نرجع لآخر سؤال مكتمل ونقفل المصفوفة
+    pos = len(fixed)
+    for _ in range(60):
+        pos = fixed.rfind('}', 0, pos)
+        if pos <= 0:
+            break
+        try:
+            parsed = _as_list(json.loads(fixed[:pos + 1] + ']', strict=False))
+            if parsed:
+                return parsed
+        except ValueError:
+            pass
+    # نطبع حوالين مكان الخطأ في لوج السيرفر عشان نعرف الموديل كتب إيه بالظبط
+    err_pos = getattr(first_error, 'pos', 0) or 0
+    print(f'[ai-json] parse failed: {first_error} | around: {fixed[max(0, err_pos - 200):err_pos + 200]!r}')
+    raise ValueError(f'رد الذكاء الاصطناعي مش JSON سليم: {first_error}')
+
+
 @exams_bp.route('/api/exams/generate-ai-quiz', methods=['POST'])
 @token_required
 def generate_ai_quiz():
@@ -1433,6 +1489,9 @@ def generate_ai_quiz():
 ]"""
         elif question_format == 'mixed':
             mcq_count = max(1, count - 2) if count >= 4 else max(1, count - 1)
+            # الفرونت إند بيقسم الامتحان الكبير لدفعات صغيرة ويحدد عدد المقالي في كل دفعة
+            if data.get('essay_count') is not None:
+                mcq_count = count - max(0, min(int(data['essay_count']), count))
             essay_count = count - mcq_count
             format_instructions = f"""المطلوب: ولّد اختباراً شاملاً مكوّناً من {count} سؤالاً مطابقاً لمنهج ({subject_name}):
 - عدد {mcq_count} سؤال اختيار من متعدد (MCQ) مع 4 خيارات وتحديد correct_option_index ورسم SVG عند الحاجة.
@@ -1523,54 +1582,35 @@ def generate_ai_quiz():
 - ضع أي معادلة أو تعبير رياضي بين علامتي دولار بصيغة LaTeX واضحة ونظيفة، مثل: $f(x) = \\sqrt{{x^2 + 1}}$
 
 {format_instructions}
-تذكر: أجب بمصفوفة JSON فقط بدون أي مقدمات أو كلام خارج الـ JSON."""
+تذكر: أجب بمصفوفة JSON فقط بدون أي مقدمات أو كلام خارج الـ JSON.
+داخل نصوص JSON اكتب كل شرطة LaTeX مزدوجة (مثال: "\\\\frac{{١}}{{٢}}" و "\\\\sqrt{{٣}}")."""
+
+        # الامتحان الكبير بيتولد على دفعات من الفرونت إند — نوجّه كل دفعة لأفكار مختلفة عشان ما تتكررش
+        batch_index = int(data.get('batch_index') or 0)
+        batch_total = int(data.get('batch_total') or 1)
+        if batch_total > 1:
+            prompt += (f"\n\nملحوظة: ده الجزء رقم {batch_index + 1} من {batch_total} من نفس الامتحان، "
+                       f"والأجزاء التانية بتتولد بالتوازي. نوّع الأفكار والمهارات الفرعية وغيّر الأرقام "
+                       f"عشان أسئلة الجزء ده ما تتكررش مع الأجزاء التانية (ركّز على الجزء رقم {batch_index + 1} من نواتج التعلم بالترتيب).")
 
         content_items.append(prompt)
 
-        response = generate_with_fallback(content_items if len(content_items) > 1 else prompt)
-        res_text = response.text.strip()
-
-        if res_text.startswith('```json'):
-            res_text = res_text[7:]
-        elif res_text.startswith('```'):
-            res_text = res_text[3:]
-        if res_text.endswith('```'):
-            res_text = res_text[:-3]
-        res_text = res_text.strip()
-
-        # استخراج وتنظيف الـ JSON لمعادلات LaTeX ورموز الهروب \
-        json_str = res_text
-        json_match = re.search(r'\[.*\]', res_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group()
-
-        questions = None
-        # 1. محاولة القراءة المباشرة
+        # JSON mode: الموديل ملزم يرجّع JSON سليم بدل نص حر بيتكسر مع المعادلات
+        # الحد الأقصى للتوكنز كبير كفاية لـ 10 أسئلة بالرسومات والحلول المقالية
+        response = generate_with_fallback(
+            content_items if len(content_items) > 1 else prompt,
+            generation_config={'response_mime_type': 'application/json', 'max_output_tokens': 32768},
+        )
         try:
-            questions = json.loads(json_str, strict=False)
+            res_text = response.text
         except Exception:
-            pass
+            reason = response.candidates[0].finish_reason if response.candidates else 'NO_CANDIDATES'
+            return jsonify({'success': False,
+                            'error': f'الذكاء الاصطناعي ما رجّعش أسئلة (السبب: {reason}). جرّب تقلل العدد أو تعيد المحاولة.'}), 502
 
-        # 2. معالجة شرطات الـ LaTeX المائلة غير المهربة
-        if questions is None:
-            try:
-                # استبدال الـ backslash غير المتبوع بـ " بـ \\
-                sanitized = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)
-                questions = json.loads(sanitized, strict=False)
-            except Exception:
-                pass
-
-        if questions is None:
-            try:
-                # استبدال كل \ ليس بعدها "
-                sanitized2 = re.sub(r'\\(?!")', r'\\\\', json_str)
-                questions = json.loads(sanitized2, strict=False)
-            except Exception:
-                pass
-
-        # 3. إذا تعذر كل ما سبق، القراءة بـ json.loads لإظهار الخطأ الدقيق
-        if questions is None:
-            questions = json.loads(json_str)
+        questions = _parse_ai_json_array(res_text)
+        if not questions:
+            return jsonify({'success': False, 'error': 'الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني.'}), 502
 
         if math_symbols == 'arabic' and questions:
             questions = _enforce_arabic_symbols(questions)

@@ -4,11 +4,12 @@ import bcrypt
 import jwt
 from datetime import datetime, timedelta
 from functools import wraps
-from flask import jsonify, request
+from flask import jsonify, request, g
 
 from db import supabase
 
 SECRET_KEY = os.getenv('FLASK_SECRET_KEY')
+TOKEN_REFRESH_WINDOW = timedelta(days=7)
 
 
 # ============ Password Helpers ============
@@ -61,6 +62,11 @@ def token_required(f):
             payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
             request.user_id = payload['user_id']
             request.user_role = payload['role']
+            # تجديد تلقائي: التوكن صلاحيته 30 يوم، فلو باقي أقل من 7 أيام نبعت توكن جديد
+            # في هيدر X-Refreshed-Token والفرونت إند يحفظه — الطالب اللي بيستخدم المنصة ما يتطردش كل شهر
+            exp = payload.get('exp')
+            if exp and exp - datetime.utcnow().timestamp() < TOKEN_REFRESH_WINDOW.total_seconds():
+                g.refreshed_token = create_token(payload['user_id'], payload['role'])
         except jwt.ExpiredSignatureError:
             return jsonify({'success': False, 'error': 'Token expired'}), 401
         except jwt.InvalidTokenError:

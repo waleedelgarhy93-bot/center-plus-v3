@@ -45,10 +45,11 @@ _RETRYABLE = ('503', '429', '504', '500', '404', 'not found', 'no longer availab
               'resource_exhausted', 'quota', 'deadline', 'timed out', 'timeout')
 
 
-def generate_with_fallback(contents, total_budget=105, per_try=80):
+def generate_with_fallback(contents, total_budget=105, per_try=80, generation_config=None):
     """توليد بالذكاء الاصطناعي مع تجربة موديلات بديلة.
     - من غير retry داخلي طويل (المكتبة كانت بتعيد المحاولة لحد 10 دقايق وتعلّق الطلب)
-    - مجموع الوقت أقل من timeout بتاع gunicorn (120 ثانية)"""
+    - مجموع الوقت أقل من timeout بتاع gunicorn (120 ثانية)
+    - generation_config اختياري (مثلاً response_mime_type=application/json و max_output_tokens)"""
     import time
     deadline = time.time() + total_budget
     errors = []
@@ -60,6 +61,7 @@ def generate_with_fallback(contents, total_budget=105, per_try=80):
             model = genai.GenerativeModel(name)
             return model.generate_content(
                 contents,
+                generation_config=generation_config,
                 request_options={'timeout': min(per_try, remaining), 'retry': None},
             )
         except Exception as e:
