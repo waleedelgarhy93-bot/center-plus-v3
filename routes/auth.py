@@ -202,6 +202,19 @@ def login():
         if not response.data and username != username.lower():
             response = supabase.table('users').select('*').eq('username', username.lower()).execute()
         if not response.data:
+            # طالب كتب بيانات الكارت في تبويب المعلم (التبويب الافتراضي) — نوجّهه بدل "بيانات غير صحيحة"
+            try:
+                card_hit = supabase.table('cards').select('id')\
+                    .eq('username', username).eq('password', password).limit(1).execute()
+                if card_hit.data:
+                    print('[login] student card credentials used on staff tab')
+                    return jsonify({
+                        'success': False,
+                        'code': 'STUDENT_CARD_ON_STAFF_TAB',
+                        'error': 'دي بيانات كارت طالب. اختار تبويب «طالب» فوق واكتب رقم الباركود مع اليوزر والباسورد.',
+                    }), 401
+            except Exception:
+                pass
             return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
         user = response.data[0]
@@ -321,15 +334,18 @@ def login_student():
 
         card_res = supabase.table('cards').select('*').eq('barcode', barcode).execute()
         if not card_res.data:
-            return jsonify({'success': False, 'error': 'الكارت غير موجود'}), 401
+            print(f'[login-student] fail: barcode not found (len={len(barcode)})')
+            return jsonify({'success': False, 'error': 'الكارت غير موجود — راجع رقم الباركود اللي على الكارت'}), 401
 
         card = card_res.data[0]
 
         if card.get('username') != username:
-            return jsonify({'success': False, 'error': 'اليوزر غير صحيح'}), 401
+            print(f'[login-student] fail: username mismatch card_id={card.get("id")} (len={len(username)})')
+            return jsonify({'success': False, 'error': 'اليوزر غير صحيح — راجع اليوزر اللي على الكارت'}), 401
 
         if card.get('password') != password:
-            return jsonify({'success': False, 'error': 'الباسورد غير صحيح'}), 401
+            print(f'[login-student] fail: password mismatch card_id={card.get("id")} (len={len(password)})')
+            return jsonify({'success': False, 'error': 'الباسورد غير صحيح — راجع الباسورد اللي على الكارت'}), 401
 
         if not card.get('student_id'):
             return jsonify({'success': False, 'error': 'الكارت غير مربوط بأي طالب'}), 401
